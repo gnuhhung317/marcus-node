@@ -1,0 +1,6 @@
+{
+  "type": "heartbeat",
+  "payload": {
+    "status": "ok"
+  }
+}

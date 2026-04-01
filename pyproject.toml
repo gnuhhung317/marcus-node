@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marcus-local-executor"
+version = "0.1.0"
+description = "Local Executor core engine for Marcus trader-side signal execution"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "websockets>=12.0,<14.0",
+]
+
+[project.scripts]
+local-executor = "local_executor.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+extraPaths = ["src"]

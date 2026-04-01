@@ -1,0 +1,7 @@
+{
+  "type": "ack",
+  "payload": {
+    "status": "ok",
+    "ack_type": "subscribe"
+  }
+}

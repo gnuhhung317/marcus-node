@@ -1,0 +1,8 @@
+{
+  "type": "signal",
+  "payload": {
+    "signal_id": "fixture-sig-1",
+    "action": "OPEN_LONG",
+    "symbol": "BTCUSDT"
+  }
+}

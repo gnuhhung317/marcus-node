@@ -1,0 +1,7 @@
+{
+  "type": "ack",
+  "payload": {
+    "status": "denied",
+    "ack_type": "subscribe"
+  }
+}

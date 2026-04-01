@@ -1,0 +1,9 @@
+{
+  "type": "subscribe",
+  "payload": {
+    "bot_id": "bot-fixture-01",
+    "protocol_version": "1.0",
+    "stream": "signal_execution",
+    "mode": "consume_only"
+  }
+}
