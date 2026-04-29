@@ -9,6 +9,7 @@ description = "Local Executor core engine for Marcus trader-side signal executio
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "ccxt>=4.2,<5.0",
   "websockets>=12.0,<14.0",
 ]
 
