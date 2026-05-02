@@ -591,6 +591,94 @@ class TestExecutionRecoveryManager:
         assert status.signals_recovered == 1
         assert status.events_replayed == 3
 
+    @pytest.mark.asyncio
+    async def test_recovery_pull_history_persists_events(self, recovery_manager, local_store):
+        """Test that pull-history phase persists fetched events into local store."""
+        signal_id = "sig-hist-001"
+
+        all_events = [
+            ExecutionEvent(
+                event_id="evt-h-001",
+                signal_id=signal_id,
+                sequence=1,
+                event_type=ExecutionEventType.SIGNAL_ACCEPTED,
+                sent_at=datetime.utcnow(),
+                exchange_time=None,
+                payload={},
+            ),
+            ExecutionEvent(
+                event_id="evt-h-002",
+                signal_id=signal_id,
+                sequence=2,
+                event_type=ExecutionEventType.ORDER_PLACED,
+                sent_at=datetime.utcnow(),
+                exchange_time=None,
+                payload={},
+            ),
+            ExecutionEvent(
+                event_id="evt-h-003",
+                signal_id=signal_id,
+                sequence=3,
+                event_type=ExecutionEventType.ORDER_PLACED,
+                sent_at=datetime.utcnow(),
+                exchange_time=None,
+                payload={},
+            ),
+        ]
+
+        async def fetch_history_func(sig_id: str, from_sequence: int = 0):
+            assert sig_id == signal_id
+            return [event for event in all_events if event.sequence >= from_sequence][:2]
+
+        status = await recovery_manager.recover(
+            signal_ids=[signal_id],
+            fetch_history_func=fetch_history_func,
+        )
+
+        stored_events = await local_store.get_events_for_signal(signal_id, from_sequence=0, limit=100)
+        assert len(stored_events) == 3
+        assert status.phase == RecoveryPhase.COMPLETE
+        assert status.events_replayed == 3
+
+    @pytest.mark.asyncio
+    async def test_recovery_replay_uses_pagination(self, recovery_manager, local_store):
+        """Test replay can process more events than one replay page."""
+        signal_id = "sig-page-001"
+
+        events = [
+            ExecutionEvent(
+                event_id="evt-p-001",
+                signal_id=signal_id,
+                sequence=1,
+                event_type=ExecutionEventType.SIGNAL_ACCEPTED,
+                sent_at=datetime.utcnow(),
+                exchange_time=None,
+                payload={},
+            )
+        ]
+        for i in range(2, 8):
+            events.append(
+                ExecutionEvent(
+                    event_id=f"evt-p-{i:03d}",
+                    signal_id=signal_id,
+                    sequence=i,
+                    event_type=ExecutionEventType.ORDER_PLACED,
+                    sent_at=datetime.utcnow(),
+                    exchange_time=None,
+                    payload={},
+                )
+            )
+
+        for event in events:
+            await local_store.store_event(event)
+
+        recovery_manager._replay_page_size = 2
+        status = await recovery_manager.recover(signal_ids=[signal_id])
+
+        assert status.phase == RecoveryPhase.COMPLETE
+        assert status.signals_recovered == 1
+        assert status.events_replayed == len(events)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

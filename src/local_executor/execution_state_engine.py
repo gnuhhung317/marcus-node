@@ -13,9 +13,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any
 
 from .execution_event_transport import (
     ExecutionEvent,
@@ -73,19 +71,10 @@ class ExecutionStateEngine:
             event.sequence,
         )
 
-        # Step 1: Check for duplicate
-        stored = await self._store.get_events_for_signal(
-            event.signal_id,
-            from_sequence=0,
-            limit=10000,  # Large limit to check all
-        )
-        for existing_event in stored:
-            if existing_event.event_id == event.event_id:
-                self._logger.debug(
-                    "Duplicate event detected event_id=%s",
-                    event.event_id,
-                )
-                raise DuplicateEventError(event.event_id)
+        # Step 1: Check for duplicate using store-level existence check (O(1))
+        if await self._store.event_exists(event.event_id):
+            self._logger.debug("Duplicate event detected event_id=%s", event.event_id)
+            raise DuplicateEventError(event.event_id)
 
         # Step 2: Get/create signal state
         signal_state = await self._store.get_or_create_signal(event.signal_id)
@@ -114,7 +103,23 @@ class ExecutionStateEngine:
         self._validate_state_transition(signal_state, event)
 
         # Step 6: Store event in local store
-        await self._store.store_event(event)
+        stored_ok = await self._store.store_event(event)
+        if not stored_ok:
+            # Re-check whether it's a duplicate or a sequence conflict
+            if await self._store.event_exists(event.event_id):
+                self._logger.debug(
+                    "Duplicate event detected during store event_id=%s",
+                    event.event_id,
+                )
+                raise DuplicateEventError(event.event_id)
+            # Otherwise treat as sequence conflict
+            self._logger.warning(
+                "Event store rejected due to sequence or integrity conflict signal_id=%s expected_seq=%d got_seq=%d",
+                event.signal_id,
+                expected_sequence,
+                event.sequence,
+            )
+            raise EventSequenceError(expected_sequence, event.sequence)
 
         # Step 7: Update signal state based on event type
         await self._apply_event_to_state(signal_state, event)
@@ -125,6 +130,22 @@ class ExecutionStateEngine:
             event.event_type.value,
             event.sequence,
         )
+
+    async def replay_event(self, event: ExecutionEvent) -> None:
+        """
+        Apply a stored event during recovery replay.
+
+        Unlike `process_event`, replay does not store the event again or perform
+        duplicate checks, because events are already persisted in the local store.
+        """
+        signal_state = await self._store.get_or_create_signal(event.signal_id)
+
+        expected_sequence = signal_state.last_sequence + 1
+        if event.sequence != expected_sequence:
+            raise EventSequenceError(expected_sequence, event.sequence)
+
+        self._validate_state_transition(signal_state, event)
+        await self._apply_event_to_state(signal_state, event)
 
     def _validate_state_transition(
         self,

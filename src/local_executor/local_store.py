@@ -24,11 +24,10 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import logging
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from .execution_event_transport import (
     ExecutionEvent,
@@ -288,7 +287,7 @@ class LocalExecutionStore:
                     event.event_id,
                 )
                 return False
-            
+
             # Insert new event
             now = datetime.utcnow().isoformat()
             received_at = event.received_at.isoformat() if event.received_at else now
@@ -319,6 +318,16 @@ class LocalExecutionStore:
                     str(e),
                 )
                 return False
+
+    async def event_exists(self, event_id: str) -> bool:
+        """Return True if an event with `event_id` exists in the store."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM execution_events WHERE event_id = ? LIMIT 1",
+                (event_id,),
+            )
+            return cursor.fetchone() is not None
 
     async def get_events_for_signal(
         self,
@@ -362,6 +371,8 @@ class LocalExecutionStore:
                 return False
             
             now = datetime.utcnow().isoformat()
+            # Ensure received_at is not NULL to satisfy schema
+            received_at_val = ack.received_at.isoformat() if ack.received_at else now
             try:
                 cursor.execute("""
                     INSERT INTO execution_acks
@@ -374,7 +385,7 @@ class LocalExecutionStore:
                     ack.status.value,
                     ack.error_code.value if ack.error_code else None,
                     ack.error_message,
-                    ack.received_at.isoformat() if ack.received_at else None,
+                    received_at_val,
                     now,
                 ))
                 self._conn.commit()

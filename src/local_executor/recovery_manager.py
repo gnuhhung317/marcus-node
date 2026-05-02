@@ -11,14 +11,13 @@ Bootstrap execution state after client redeploy by:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 from datetime import datetime
 from enum import Enum
 
-from .execution_event_transport import ExecutionEvent, ExecutionEventType
+from .execution_event_transport import ExecutionEvent
 from .local_store import LocalExecutionStore
 from .execution_state_engine import ExecutionStateEngine
 
@@ -71,6 +70,7 @@ class ExecutionRecoveryManager:
             events_replayed=0,
             errors=[],
         )
+        self._replay_page_size = 1000
 
     async def recover(
         self,
@@ -182,12 +182,39 @@ class ExecutionRecoveryManager:
 
         for signal_id in signal_ids:
             try:
-                # Ask backend for all events for this signal
-                events = await fetch_history_func(signal_id, from_sequence=0)
+                # Ensure FK target exists before persisting events
+                await self._store.get_or_create_signal(signal_id)
+
+                # Pull and persist history incrementally from backend
+                from_sequence = 0
+                total_fetched = 0
+                total_stored = 0
+                while True:
+                    events = await fetch_history_func(signal_id, from_sequence=from_sequence)
+                    if not events:
+                        break
+
+                    events = sorted(events, key=lambda e: e.sequence)
+
+                    max_sequence_in_page = from_sequence
+                    for event in events:
+                        max_sequence_in_page = max(max_sequence_in_page, event.sequence)
+                        if await self._store.store_event(event):
+                            total_stored += 1
+
+                    total_fetched += len(events)
+
+                    # Prevent infinite loops if backend ignores from_sequence.
+                    if max_sequence_in_page < from_sequence:
+                        break
+
+                    from_sequence = max_sequence_in_page + 1
+
                 self._logger.info(
-                    "Fetched event history signal_id=%s count=%d",
+                    "Fetched and persisted history signal_id=%s fetched=%d stored=%d",
                     signal_id,
-                    len(events),
+                    total_fetched,
+                    total_stored,
                 )
             except Exception as e:
                 self._logger.warning(
@@ -210,19 +237,8 @@ class ExecutionRecoveryManager:
 
         for signal_id in signal_ids:
             try:
-                # Get all events for this signal from local store
-                events = await self._store.get_events_for_signal(
-                    signal_id,
-                    from_sequence=0,
-                    limit=10000,
-                )
-
-                if not events:
-                    self._logger.debug("No events to replay for signal_id=%s", signal_id)
-                    continue
-
-                # Ensure signal state exists
-                signal_state = await self._store.get_or_create_signal(signal_id)
+                # Ensure signal row exists before resetting state fields.
+                await self._store.get_or_create_signal(signal_id)
 
                 # Reset state to initial for replay
                 await self._store.update_signal_state(
@@ -233,31 +249,44 @@ class ExecutionRecoveryManager:
                     last_sequence=0,
                 )
 
-                # Replay each event through state engine
-                # Note: We create synthetic events to avoid duplicate detection
-                # since the events are already stored in the database
-                for event in events:
-                    try:
-                        # For recovery, we skip the duplicate check in the state engine
-                        # by directly applying state transitions without full validation
-                        await self._apply_event_without_duplicate_check(event)
-                        self._recovery_status.events_replayed += 1
+                events_for_signal = 0
+                next_sequence = 0
+                while True:
+                    events = await self._store.get_events_for_signal(
+                        signal_id,
+                        from_sequence=next_sequence,
+                        limit=self._replay_page_size,
+                    )
 
-                    except Exception as e:
-                        self._logger.error(
-                            "Failed to replay event signal_id=%s event_id=%s error=%s",
-                            signal_id,
-                            event.event_id,
-                            str(e),
-                        )
-                        # Continue replay despite individual event errors
-                        pass
+                    if not events:
+                        break
+
+                    for event in events:
+                        try:
+                            await self._state_engine.replay_event(event)
+                            self._recovery_status.events_replayed += 1
+                            events_for_signal += 1
+                        except Exception as e:
+                            self._logger.error(
+                                "Failed to replay event signal_id=%s event_id=%s error=%s",
+                                signal_id,
+                                event.event_id,
+                                str(e),
+                            )
+                            # Continue replay despite individual event errors
+                            pass
+
+                    next_sequence = events[-1].sequence + 1
+
+                if events_for_signal == 0:
+                    self._logger.debug("No events to replay for signal_id=%s", signal_id)
+                    continue
 
                 self._recovery_status.signals_recovered += 1
                 self._logger.info(
                     "Replayed events signal_id=%s count=%d",
                     signal_id,
-                    len(events),
+                    events_for_signal,
                 )
 
             except Exception as e:
@@ -270,20 +299,6 @@ class ExecutionRecoveryManager:
                 self._recovery_status.errors.append(
                     f"Failed to replay {signal_id}: {str(e)}"
                 )
-
-    async def _apply_event_without_duplicate_check(self, event: ExecutionEvent) -> None:
-        """
-        Apply event state transition without duplicate detection.
-        
-        Used during recovery when events are already in the store.
-        """
-        signal_state = await self._store.get_or_create_signal(event.signal_id)
-        
-        # Validate state transition
-        self._state_engine._validate_state_transition(signal_state, event)
-        
-        # Apply state update
-        await self._state_engine._apply_event_to_state(signal_state, event)
 
     async def _exchange_sync_phase(
         self,

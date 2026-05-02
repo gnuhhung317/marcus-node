@@ -13,13 +13,12 @@ Protocol:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Awaitable
-from uuid import uuid4
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 
 class ExecutionEventType(str, Enum):
