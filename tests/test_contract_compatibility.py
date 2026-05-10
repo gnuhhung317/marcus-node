@@ -2,6 +2,9 @@ from __future__ import annotations
 
 # pyright: reportMissingImports=false
 
+import base64
+import hashlib
+import hmac
 import json
 import sys
 import unittest
@@ -34,8 +37,8 @@ class _HandshakeWebSocket:
 
 
 class ExecutorContractFixtureTest(unittest.IsolatedAsyncioTestCase):
-    async def test_should_emit_subscribe_frame_matching_contract_fixture(self) -> None:
-        expected_subscribe = _load_fixture("ws_handshake_subscribe_v1.json")
+    async def test_should_emit_signed_handshake_frame_matching_contract_fixture(self) -> None:
+        expected_handshake = _load_fixture("ws_handshake_subscribe_v1.json")
         ack_valid = _load_fixture("ws_ack_valid_v1.json")
 
         client = ResilientWebSocketClient(
@@ -50,13 +53,45 @@ class ExecutorContractFixtureTest(unittest.IsolatedAsyncioTestCase):
             bot_id="bot-fixture-01",
             protocol_version="1.0",
             handshake_ack_required=True,
+            nonce_func=lambda: "fixture-nonce-01",
+            timestamp_func=lambda: "2026-05-09T10:00:00Z",
         )
         websocket = _HandshakeWebSocket(incoming_frames=[json.dumps(ack_valid)])
 
         await client._perform_handshake(websocket)
 
         self.assertEqual(len(websocket.sent_frames), 1)
-        self.assertEqual(json.loads(websocket.sent_frames[0]), expected_subscribe)
+        actual_handshake = json.loads(websocket.sent_frames[0])
+        self.assertEqual(actual_handshake["type"], "handshake")
+        self.assertEqual(actual_handshake["botId"], expected_handshake["payload"]["bot_id"])
+        self.assertEqual(actual_handshake["timestamp"], "2026-05-09T10:00:00Z")
+        self.assertEqual(actual_handshake["payload"], {
+            "nonce": "fixture-nonce-01",
+            "protocol_version": "1.0",
+            "stream": "signal_execution",
+            "mode": "consume_only",
+            "bot_id": "bot-fixture-01",
+            "timestamp": "2026-05-09T10:00:00Z",
+        })
+
+        expected_payload = {
+            "nonce": "fixture-nonce-01",
+            "protocol_version": "1.0",
+            "stream": "signal_execution",
+            "mode": "consume_only",
+            "bot_id": "bot-fixture-01",
+            "timestamp": "2026-05-09T10:00:00Z",
+        }
+        payload_json = json.dumps(expected_payload, separators=(",", ":"), sort_keys=True)
+        payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+        expected_signature = base64.b64encode(
+            hmac.new(
+                b"secret-token",
+                f"bot-fixture-01|2026-05-09T10:00:00Z|{payload_b64}".encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode("ascii")
+        self.assertEqual(actual_handshake["signature"], expected_signature)
 
     async def test_should_decode_signal_and_heartbeat_from_fixture_contract(self) -> None:
         signal_fixture = _load_fixture("ws_signal_envelope_v1.json")

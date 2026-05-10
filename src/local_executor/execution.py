@@ -124,6 +124,49 @@ class CcxtSignalExecutor:
         self._logger = logger or logging.getLogger(__name__)
         self._exchange = None
 
+    async def fetch_balance(self) -> dict[str, float]:
+        """Retrieve current account balance, safe for execution mode."""
+        return await asyncio.to_thread(self._fetch_balance_sync)
+
+    def _fetch_balance_sync(self) -> dict[str, float]:
+        if self._config.execution_mode == "dry-run":
+            # Simply return the stable dry-run configured balance
+            val = self._config.dry_run_initial_balance
+            return {"total": val, "free": val, "used": 0.0, "currency": "USDT"}
+
+        try:
+            exchange = self._exchange or self._build_exchange()
+            self._exchange = exchange
+            balance = exchange.fetch_balance()
+            
+            # Prioritize common settlement currencies
+            for curr in ("USDT", "USDC", "BUSD"):
+                if curr in balance and isinstance(balance[curr], dict):
+                    details = balance[curr]
+                    return {
+                        "total": float(details.get("total", 0.0)),
+                        "free": float(details.get("free", 0.0)),
+                        "used": float(details.get("used", 0.0)),
+                        "currency": curr
+                    }
+
+            # Fallback to the first key with non-zero total balance in 'total' node
+            if "total" in balance and isinstance(balance["total"], dict):
+                for curr, amt in balance["total"].items():
+                    if amt and float(amt) > 0:
+                        return {
+                            "total": float(amt),
+                            "free": float(balance.get("free", {}).get(curr, 0.0)),
+                            "used": float(balance.get("used", {}).get(curr, 0.0)),
+                            "currency": curr
+                        }
+
+            return {"total": 0.0, "free": 0.0, "used": 0.0, "currency": "NONE"}
+
+        except Exception as exc:
+            self._logger.error("Failed to fetch live balance from exchange: %s", exc)
+            raise
+
     async def execute_signal(self, payload: dict[str, Any]) -> ExecutionResult:
         return await asyncio.to_thread(self._execute_signal_sync, payload)
 

@@ -26,6 +26,8 @@ class ExecutorConfig:
     handshake_ack_required: bool = True
     handshake_ack_timeout_seconds: float = 5.0
     heartbeat_stale_seconds: float = 45.0
+    dry_run_initial_balance: float = 10000.0
+    balance_sync_interval_seconds: float = 60.0
     log_level: str = "INFO"
 
     @classmethod
@@ -67,6 +69,8 @@ class ExecutorConfig:
             handshake_ack_required=_bool("HANDSHAKE_ACK_REQUIRED", True),
             handshake_ack_timeout_seconds=_float("HANDSHAKE_ACK_TIMEOUT_SECONDS", 5.0),
             heartbeat_stale_seconds=_float("HEARTBEAT_STALE_SECONDS", 45.0),
+            dry_run_initial_balance=_float("DRY_RUN_INITIAL_BALANCE", 10000.0),
+            balance_sync_interval_seconds=_float("BALANCE_SYNC_INTERVAL_SECONDS", 60.0),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

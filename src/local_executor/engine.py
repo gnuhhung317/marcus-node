@@ -38,7 +38,83 @@ class LocalExecutorEngine:
         )
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
-        await self._ws_client.run(stop_event=stop_event)
+        stop_event = stop_event or asyncio.Event()
+        
+        self._logger.info("Starting LocalExecutorEngine loops.")
+        tasks = [
+            asyncio.create_task(self._ws_client.run(stop_event=stop_event), name="ws_client_run"),
+            asyncio.create_task(self._balance_sync_loop(stop_event), name="balance_sync_loop")
+        ]
+
+        try:
+            # Run concurrently until stopped or client errors out
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            # Propagate errors from done tasks if any
+            for t in done:
+                if not t.cancelled() and t.exception():
+                    exc = t.exception()
+                    self._logger.error("Task encountered fatal error: %s", exc)
+                    raise exc
+        finally:
+            # Graceful shutdown of remaining background tasks
+            self._logger.info("Shutting down engine tasks.")
+            stop_event.set()
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _balance_sync_loop(self, stop_event: asyncio.Event) -> None:
+        """Periodically emits account equity to backend for dashboard views."""
+        interval = max(5.0, self._config.balance_sync_interval_seconds)
+        self._logger.info("Balance sync task initiated. interval=%.1fs", interval)
+        
+        # Wait brief moment to allow handshake to settle on startup
+        await asyncio.sleep(5.0)
+
+        while not stop_event.is_set():
+            try:
+                # 1. Fetch account snapshots safely from CcxtProxy
+                bal = await self._executor.fetch_balance()
+                
+                # 2. Build compliant JSON audit-push frame
+                # Note: Backend requires: type='audit-push', payload={kind: 'balance-snapshot', ...}
+                frame = {
+                    "type": "audit-push",
+                    "botId": self._config.bot_id,
+                    "payload": {
+                        "kind": "balance-snapshot",
+                        "total": bal["total"],
+                        "free": bal["free"],
+                        "used": bal["used"],
+                        "currency": bal["currency"],
+                        "mode": self._config.execution_mode,
+                        "timestamp": self._ws_client._now_utc_iso()
+                    }
+                }
+                
+                # 3. Attempt push over raw socket
+                success = await self._ws_client.send_frame(frame)
+                if success:
+                    self._logger.debug(
+                        "Balance synced successfully total=%.2f currency=%s", 
+                        bal["total"], bal["currency"]
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.warning("Balance sync attempt failed: %s", e)
+
+            # Wait for next cyclic tick, gracefully breaking if stopped
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                break  # stop_event was set
+            except asyncio.TimeoutError:
+                continue  # cycle normally
 
     async def _handle_signal(self, payload: dict[str, Any]) -> None:
         await self._on_signal(payload)
