@@ -183,6 +183,15 @@ class ResilientWebSocketClient:
 
         message_type, payload = envelope
         if message_type == "signal":
+            # Clean Boundary Protocol: Acknowledge immediately to server
+            signal_id = payload.get("signal_id")
+            if signal_id:
+                asyncio.create_task(self.send_frame({
+                    "type": "signal_ack",
+                    "payload": {"signal_id": signal_id, "bot_id": self._bot_id}
+                }))
+                self._logger.info("Scheduled immediate delivery ACK for signal_id=%s", signal_id)
+
             await self._on_signal(payload)
             return True
 

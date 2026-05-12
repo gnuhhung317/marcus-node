@@ -215,6 +215,15 @@ class LocalExecutionStore:
         state = await self.get_signal_state(signal_id)
         return state.last_sequence if state else 0
 
+    async def get_active_signals(self) -> list[str]:
+        """Discover signal_ids currently not closed to power automatic recovery bootstrapping."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT signal_id FROM execution_signals WHERE position_state != 'CLOSED'"
+            )
+            return [row[0] for row in cursor.fetchall()]
+
     async def update_signal_state(
         self,
         signal_id: str,

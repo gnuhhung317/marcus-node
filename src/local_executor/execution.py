@@ -181,6 +181,27 @@ class CcxtSignalExecutor:
                 errors=errors,
             )
 
+        # Boundary Check: Deadline Enforcer
+        import time
+        cancel_after = payload.get("cancel_after_timestamp")
+        if cancel_after:
+            try:
+                cancel_epoch = float(cancel_after)
+                now = time.time()
+                if now > cancel_epoch:
+                    self._logger.warning(
+                        "Dropped signal due to clean boundary expiry. signal_id=%s now=%f expiry=%f",
+                        payload.get("signal_id"), now, cancel_epoch
+                    )
+                    return ExecutionResult(
+                        mode="error",
+                        order_id=None,
+                        details={"signal": payload, "reason": "EXPIRED_ON_ARRIVAL"},
+                        errors=["Signal arrived after configured cancel_after_timestamp deadline."],
+                    )
+            except (ValueError, TypeError):
+                self._logger.warning("Invalid cancel_after_timestamp format: %s", cancel_after)
+
         try:
             order = self._build_order(payload)
         except (ValueError, KeyError) as exc:
@@ -276,6 +297,13 @@ class CcxtSignalExecutor:
             price = None
 
         params: dict[str, Any] = {}
+        
+        # Inject ClientOrderId as source-of-truth link back to DB
+        signal_id = payload.get("signal_id")
+        if signal_id:
+            # Standardized across CCXT exchanges
+            params["clientOrderId"] = str(signal_id)
+
         if reduce_only:
             params["reduceOnly"] = True
 
