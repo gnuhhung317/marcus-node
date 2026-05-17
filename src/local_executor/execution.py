@@ -19,7 +19,7 @@ class ExecutionResult:
 class SignalSchema:
     """Signal payload contract from backend."""
 
-    REQUIRED_FIELDS = {"signal_id", "action", "symbol"}
+    REQUIRED_FIELDS = {"signal_id", "action"}
     OPTIONAL_FIELDS = {
         "amount",
         "quantity",
@@ -60,15 +60,16 @@ class SignalSchema:
             return False, ["Payload must be a dictionary"]
 
         for field in SignalSchema.REQUIRED_FIELDS:
-            if field not in payload or payload[field] in (None, ""):
+            if field not in payload:
                 errors.append(f"Missing required field: {field}")
 
+        # If any required field is missing, fail fast with those messages
         if errors:
             return False, errors
 
-        signal_id = str(payload.get("signal_id", "")).strip()
-        if not signal_id:
-            errors.append("signal_id must be non-empty string")
+        # signal_id must be present and non-empty
+        if payload.get("signal_id") in (None, ""):
+            errors.append("signal_id must be non-empty")
 
         action = str(payload.get("action", "")).strip().upper()
         if action not in SignalSchema.VALID_ACTIONS:
@@ -85,16 +86,14 @@ class SignalSchema:
             errors.append("symbol (or asset_pair/assetPair) must be non-empty string")
 
         order_type = str(
-            payload.get("order_type") or payload.get("orderType", "market")
+            payload.get("order_type") if "order_type" in payload else payload.get("orderType", "market")
         ).strip().lower()
         if order_type not in {"market", "limit"}:
             errors.append(f"Invalid order_type: {order_type}. Must be 'market' or 'limit'")
 
         if order_type == "limit":
             price = (
-                payload.get("price")
-                or payload.get("limit_price")
-                or payload.get("limitPrice")
+                payload.get("price") if "price" in payload else payload.get("limit_price") if "limit_price" in payload else payload.get("limitPrice")
             )
             if price in (None, ""):
                 errors.append("Limit orders require price field")
@@ -104,10 +103,16 @@ class SignalSchema:
                 except (ValueError, TypeError):
                     errors.append(f"price must be numeric, got {price}")
 
-        amount = (
-            payload.get("amount") or payload.get("quantity") or payload.get("size")
-        )
-        if amount not in (None, ""):
+        # Respect explicit zero values; check presence of keys instead of truthiness
+        amount = None
+        if "amount" in payload:
+            amount = payload.get("amount")
+        elif "quantity" in payload:
+            amount = payload.get("quantity")
+        elif "size" in payload:
+            amount = payload.get("size")
+
+        if amount is not None and amount != "":
             try:
                 amt = float(amount)
                 if amt <= 0:

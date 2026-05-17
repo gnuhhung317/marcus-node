@@ -56,7 +56,12 @@ class LocalExecutorEngine:
             for t in done:
                 if not t.cancelled() and t.exception():
                     exc = t.exception()
-                    self._logger.error("Task encountered fatal error: %s", exc)
+                    self._logger.error(
+                        "Task encountered fatal error: %s repr=%s",
+                        exc.__class__.__name__,
+                        repr(exc),
+                    )
+                    self._logger.debug("Full exception traceback:", exc_info=exc)
                     raise exc
         finally:
             # Graceful shutdown of remaining background tasks

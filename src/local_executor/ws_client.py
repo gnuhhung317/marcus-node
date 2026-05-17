@@ -101,13 +101,16 @@ class ResilientWebSocketClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - runtime needs broad reconnect handling
+                # Include exception details to help triage server-side closes
                 self._logger.warning(
-                    "WebSocket connection dropped error=%s reconnect_count=%d heartbeat_timeout_count=%d invalid_message_count=%d",
+                    "WebSocket connection dropped error=%s reconnect_count=%d heartbeat_timeout_count=%d invalid_message_count=%d exc=%s",
                     exc.__class__.__name__,
                     self._reconnect_count,
                     self._heartbeat_timeout_count,
                     self._invalid_message_count,
+                    repr(exc),
                 )
+                self._logger.debug("Full exception details:", exc_info=exc)
             finally:
                 self._websocket = None  # Clear websocket reference on disconnect
 
@@ -133,7 +136,18 @@ class ResilientWebSocketClient:
                 await self._do_heartbeat(websocket)
                 if self._is_heartbeat_stale():
                     raise RuntimeError("Heartbeat stale after ping/pong fallback.")
-            except ConnectionClosed:
+            except ConnectionClosed as cc:
+                # Log close code and reason for diagnostics then re-raise
+                try:
+                    code = getattr(cc, "code", None)
+                    reason = getattr(cc, "reason", None)
+                    self._logger.warning(
+                        "WebSocket closed by server code=%s reason=%s",
+                        code,
+                        reason,
+                    )
+                except Exception:
+                    self._logger.warning("WebSocket closed by server (no details).")
                 raise
 
     async def _perform_handshake(self, websocket: Any) -> None:
@@ -317,7 +331,7 @@ class ResilientWebSocketClient:
         }
 
     def _sign_handshake(self, payload: dict[str, Any]) -> str:
-        payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        payload_json = json.dumps(payload, separators=(",",":"))
         payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
         message = f"{self._bot_id}|{payload['timestamp']}|{payload_b64}".encode("utf-8")
         digest = hmac.new(self._ws_token.encode("utf-8"), message, hashlib.sha256).digest()

@@ -82,7 +82,7 @@ class ExecutorContractFixtureTest(unittest.IsolatedAsyncioTestCase):
             "bot_id": "bot-fixture-01",
             "timestamp": "2026-05-09T10:00:00Z",
         }
-        payload_json = json.dumps(expected_payload, separators=(",", ":"), sort_keys=True)
+        payload_json = json.dumps(expected_payload, separators=(",", ":"))
         payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
         expected_signature = base64.b64encode(
             hmac.new(
