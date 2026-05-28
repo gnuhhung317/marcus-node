@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import requests
 
-base='http://171.244.195.150:8081'
+base='https://marcus-api.tromoi.xyz'
 paths=['/auth/login','/api/auth/login','/api/v1/auth/login','/auth/register','/api/auth/register','/api/v1/auth/register']
 print('Checking register/login endpoints on', base)
 for p in paths:

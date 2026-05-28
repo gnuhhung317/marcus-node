@@ -179,7 +179,11 @@ class ResilientWebSocketClient:
             if message_type == "heartbeat":
                 self._mark_heartbeat("protocol")
                 continue
-            if message_type in {"handshake-ack", "ack", "system"} and self._is_valid_handshake_ack(payload):
+            if message_type == "system":
+                code = payload.get("code", "unknown")
+                msg = payload.get("message", "unknown error")
+                raise RuntimeError(f"Handshake rejected by server. Code: {code}, Message: {msg}")
+            if message_type in {"handshake-ack", "ack"} and self._is_valid_handshake_ack(payload):
                 self._logger.info("Handshake acknowledged for bot_id=%s", self._bot_id)
                 return
 
@@ -300,7 +304,7 @@ class ResilientWebSocketClient:
         return normalized, message
 
     def _is_valid_handshake_ack(self, payload: dict[str, Any]) -> bool:
-        status = str(payload.get("status", "ok")).strip().lower()
+        status = str(payload.get("status", "")).strip().lower()
         ack_type = str(payload.get("ack_type") or payload.get("for") or payload.get("event") or "").strip().lower()
 
         if status not in {"ok", "success", "accepted"}:
