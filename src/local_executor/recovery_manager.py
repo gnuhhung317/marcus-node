@@ -157,9 +157,8 @@ class ExecutionRecoveryManager:
             # Explicit signals provided
             to_recover = signal_ids
         else:
-            # Auto-discover signals from store (those with sequence > 0)
-            to_recover = []
-            # TODO: Add discovery method to LocalExecutionStore
+            # Auto-discover signals from store (those not closed)
+            to_recover = await self._store.get_active_signals()
         
         self._logger.info(
             "Phase: BOOTSTRAP signals_to_recover=%d",

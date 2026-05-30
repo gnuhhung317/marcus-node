@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+import asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -41,6 +42,43 @@ class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0]["signal_id"], "sig-2")
+
+    async def test_sweeper_invokes_cancel(self) -> None:
+        from unittest.mock import AsyncMock
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+        )
+
+        store = __import__("local_executor.local_store", fromlist=["LocalExecutionStore"]).LocalExecutionStore(":memory:")
+        await store.initialize()
+
+        engine = LocalExecutorEngine(config=config, local_store=store)
+
+        # Prepare a signal with past cancel deadline
+        sid = "sig-sweeper-1"
+        await store.get_or_create_signal(sid)
+        import time
+        past = int(time.time()) - 10
+        await store.update_signal_state(sid, signal_state="OPEN", policies={"cancelOrderAfter": past}, order_id="ord-xyz", order_symbol="BTC/USDT")
+
+        # Inject async mock cancel_order
+        engine._executor.cancel_order = AsyncMock(return_value=True)
+
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(engine._deadline_sweeper_loop(stop_event), name="sweeper_test")
+
+        # Let the sweeper run once (it waits 1s then checks)
+        await asyncio.sleep(1.6)
+        stop_event.set()
+        await task
+
+        engine._executor.cancel_order.assert_awaited()
 
 
 class SignalSchemaValidationTest(unittest.TestCase):
@@ -429,6 +467,71 @@ class CcxtSignalExecutorBuildOrderTest(unittest.TestCase):
         self.assertIn("Unsupported action", str(ctx.exception))
 
 
+class CcxtSignalExecutorMultiMarketTest(unittest.TestCase):
+    def test_should_cache_exchanges_separately_and_set_correct_options(self) -> None:
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=1.0,
+            default_order_type="market",
+            execution_mode="live",
+        )
+        executor = CcxtSignalExecutor(config)
+        
+        # We can mock the ccxt dependency or check _build_exchange output
+        from unittest.mock import patch, MagicMock
+        with patch("ccxt.binance") as mock_binance:
+            mock_spot = MagicMock()
+            mock_future = MagicMock()
+            
+            # Set side effect to return spot or future based on the options defaultType passed to constructor
+            def side_effect(config_dict):
+                options = config_dict.get("options", {})
+                default_type = options.get("defaultType")
+                if default_type == "spot":
+                    return mock_spot
+                elif default_type == "future":
+                    return mock_future
+                return MagicMock()
+            
+            mock_binance.side_effect = side_effect
+            
+            spot_ex = executor._get_exchange("SPOT")
+            future_ex = executor._get_exchange("FUTURE")
+            
+            self.assertEqual(spot_ex, mock_spot)
+            self.assertEqual(future_ex, mock_future)
+            self.assertNotEqual(spot_ex, future_ex)
+            
+            # Ensure calling it again returns the cached instances
+            self.assertEqual(executor._get_exchange("SPOT"), mock_spot)
+            self.assertEqual(executor._get_exchange("FUTURE"), future_ex)
+
+    def test_backward_compatibility_with_mock_exchange(self) -> None:
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=1.0,
+        )
+        executor = CcxtSignalExecutor(config)
+        
+        mock_ex = "my-mocked-exchange"
+        executor._exchange = mock_ex
+        
+        # When _exchange property is directly injected, _get_exchange should fall back to it
+        self.assertEqual(executor._get_exchange("SPOT"), mock_ex)
+        self.assertEqual(executor._get_exchange("FUTURE"), mock_ex)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

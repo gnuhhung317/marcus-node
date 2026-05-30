@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
+from pathlib import Path
 
 from .config import ExecutorConfig
 from .engine import LocalExecutorEngine
 from .env_loader import load_env_file
+from .local_store import LocalExecutionStore
 
 
 def main() -> None:
@@ -29,13 +32,18 @@ async def _run() -> None:
             # Windows event loop may not support signal handlers.
             pass
 
-    engine = LocalExecutorEngine(config=config)
-    logger.info("Local Executor started for bot_id=%s", config.bot_id)
+    db_path = Path(os.getenv("EXECUTOR_DB_PATH", "executor_state.db"))
+    local_store = LocalExecutionStore(db_path=db_path, logger=logging.getLogger("local_store"))
+
+    engine = LocalExecutorEngine(config=config, local_store=local_store)
+    logger.info("Local Executor started bot_id=%s db=%s", config.bot_id, db_path)
 
     try:
         await engine.run(stop_event=stop_event)
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user.")
+
+
 
 
 def _configure_logging(level: str) -> None:

@@ -26,6 +26,8 @@ class ExecutorConfig:
     handshake_ack_required: bool = True
     handshake_ack_timeout_seconds: float = 5.0
     heartbeat_stale_seconds: float = 45.0
+    dry_run_initial_balance: float = 10000.0
+    balance_sync_interval_seconds: float = 60.0
     log_level: str = "INFO"
 
     @classmethod
@@ -33,18 +35,23 @@ class ExecutorConfig:
         ws_url = _required("SYSTEM_WS_URL")
         ws_token = _required("SYSTEM_WS_TOKEN")
         bot_id = _required("BOT_ID")
+        execution_mode = os.getenv("EXECUTION_MODE", "dry-run").strip().lower() or "dry-run"
+        if execution_mode not in {"dry-run", "live"}:
+            raise ValueError("EXECUTION_MODE must be one of: dry-run, live")
 
-        exchange_id = _required("EXCHANGE_ID")
-        exchange_api_key = _required("EXCHANGE_API_KEY")
-        exchange_api_secret = _required("EXCHANGE_API_SECRET")
+        exchange_id = _optional("EXCHANGE_ID") or "binance"
+        exchange_api_key = _optional("EXCHANGE_API_KEY") or ""
+        exchange_api_secret = _optional("EXCHANGE_API_SECRET") or ""
         exchange_api_passphrase = _optional("EXCHANGE_API_PASSPHRASE")
         exchange_default_type = _optional("EXCHANGE_DEFAULT_TYPE")
         default_order_amount = _float("DEFAULT_ORDER_AMOUNT", 0.0)
         if default_order_amount <= 0:
             raise ValueError("DEFAULT_ORDER_AMOUNT must be > 0")
-        execution_mode = os.getenv("EXECUTION_MODE", "dry-run").strip().lower() or "dry-run"
-        if execution_mode not in {"dry-run", "live"}:
-            raise ValueError("EXECUTION_MODE must be one of: dry-run, live")
+
+        if execution_mode == "live":
+            exchange_id = _required("EXCHANGE_ID")
+            exchange_api_key = _required("EXCHANGE_API_KEY")
+            exchange_api_secret = _required("EXCHANGE_API_SECRET")
 
         return cls(
             ws_url=ws_url,
@@ -67,6 +74,8 @@ class ExecutorConfig:
             handshake_ack_required=_bool("HANDSHAKE_ACK_REQUIRED", True),
             handshake_ack_timeout_seconds=_float("HANDSHAKE_ACK_TIMEOUT_SECONDS", 5.0),
             heartbeat_stale_seconds=_float("HEARTBEAT_STALE_SECONDS", 45.0),
+            dry_run_initial_balance=_float("DRY_RUN_INITIAL_BALANCE", 10000.0),
+            balance_sync_interval_seconds=_float("BALANCE_SYNC_INTERVAL_SECONDS", 60.0),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

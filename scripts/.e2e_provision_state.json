@@ -1,0 +1,8 @@
+{
+  "base_url": "https://marcus-api.tromoi.xyz",
+  "bot_api_key": "ak_57b03446d3254b9c89f82368e0812358",
+  "bot_id": "bot_caf4569262e34721adcca650b297151e",
+  "bot_signer_secret": "sk_c884e8ba06a74ac39933c3d7d80224c5",
+  "dev_token": "eyJhbGciOiJIUzM4NCJ9.eyJzdWIiOiJ1c3JfZGExZDVjMGI1MGU4NGM0ZTljYWFiYzU2ZGNiYmIyOWQiLCJ1c2VybmFtZSI6ImRlditlMmUxIiwicm9sZSI6IkRFVkVMT1BFUiIsInRva2VuVHlwZSI6IkFDQ0VTUyIsImlhdCI6MTc3OTgxMTczMywiZXhwIjoxNzgzNDExNzMzfQ.N7ckl15VlgEEEM8hEfWCAa3wZZygSh7xk8FUwOybp4egqh8b9DsQhA9qZjbLa-zU",
+  "updated_at": "2026-05-26T16:08:59.102223+00:00"
+}

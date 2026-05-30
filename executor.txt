@@ -1,0 +1,2985 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+The content has been processed where content has been compressed (code blocks are separated by ⋮---- delimiter).
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: **/*.test.*, **/*.spec.*, **/node_modules/**, **/dist/**, **/.*/**, *.txt, *.toml, **.pyc
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Content has been compressed - code blocks are separated by ⋮---- delimiter
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env.example
+.gitignore
+ARCHITECTURE.md
+Dockerfile.executor
+Dockerfile.provisioner
+executor_state.db
+GEMINI.MD
+local_executor.py
+README.md
+scripts/.e2e_provision_state.json
+scripts/debug_send_signal.py
+scripts/end2end_provision_and_connect.py
+scripts/probe_auth_endpoints.py
+scripts/probe_ws_handshake.py
+scripts/run_signal_smoke.py
+scripts/ws_simulator.py
+src/local_executor/__init__.py
+src/local_executor/cli.py
+src/local_executor/config.py
+src/local_executor/engine.py
+src/local_executor/env_loader.py
+src/local_executor/execution_event_transport.py
+src/local_executor/execution_state_engine.py
+src/local_executor/execution.py
+src/local_executor/local_store.py
+src/local_executor/recovery_manager.py
+src/local_executor/ws_client.py
+src/marcus_local_executor.egg-info/dependency_links.txt
+src/marcus_local_executor.egg-info/entry_points.txt
+src/marcus_local_executor.egg-info/PKG-INFO
+src/marcus_local_executor.egg-info/requires.txt
+src/marcus_local_executor.egg-info/SOURCES.txt
+src/marcus_local_executor.egg-info/top_level.txt
+tests/conftest.py
+tests/fixtures/contracts/ws_ack_invalid_v1.json
+tests/fixtures/contracts/ws_ack_valid_v1.json
+tests/fixtures/contracts/ws_handshake_subscribe_v1.json
+tests/fixtures/contracts/ws_heartbeat_v1.json
+tests/fixtures/contracts/ws_signal_envelope_v1.json
+tests/fixtures/contracts/ws_unsupported_v1.json
+tests/test_chaos_recovery.py
+tests/test_contract_compatibility.py
+tests/test_end2end_provision_and_connect.py
+tests/test_engine.py
+tests/test_execution_events.py
+tests/test_ws_client.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="Dockerfile.executor">
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY local_executor.py ./
+
+RUN pip install --no-cache-dir -e .
+</file>
+
+<file path="Dockerfile.provisioner">
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY scripts ./scripts
+
+RUN pip install --no-cache-dir requests && pip install --no-cache-dir -e .
+</file>
+
+<file path="GEMINI.MD">
+# Project Explorer Agent
+
+## Your role
+You are a senior software architect helping the owner understand this codebase deeply.
+Your job is NOT to answer questions — it is to proactively explore, map, and explain the system.
+Think like a new engineer doing their first week of onboarding.
+
+## Persona constraints
+- Be direct and specific. No vague summaries.
+- If you are uncertain about something, say "UNCLEAR — needs verification"
+- Never infer intent. Describe what code DOES, not what it was "meant" to do.
+- Flag every assumption you make.
+
+## Output language
+- Explain in Vietnamese (conversational tone)
+- Code references, file paths, class names stay in English
+- Use analogies when explaining abstract concepts
+
+## What you have access to
+- Full filesystem read access to this project
+- Ability to run: `find`, `grep`, `cat`, `tree`, `wc -l`
+- You may NOT modify any files unless explicitly told to
+
+## Exploration strategy (follow this order)
+1. Map the folder structure first
+2. Identify entry points (main, index, app, bootstrap)  
+3. Trace the primary request/data flow end-to-end
+4. Identify all external dependencies and integrations
+5. Document each module's responsibility in one sentence
+
+## Output format for each module
+```
+### [Module name]
+- **File**: path/to/file
+- **Responsibility**: (1 sentence)
+- **Depends on**: [list]
+- **Called by**: [list]
+- **Key decision**: any non-obvious design choice
+- **Risk/debt**: any smell, TODO, or fragile part
+```
+
+## What to do when you finish
+After full exploration, produce a file called `ARCHITECTURE.md` at project root.
+Structure it as: Overview → Module map → Data flow → External dependencies → Risk areas
+</file>
+
+<file path="scripts/.e2e_provision_state.json">
+{
+  "base_url": "https://marcus-api.tromoi.xyz",
+  "bot_api_key": "ak_57b03446d3254b9c89f82368e0812358",
+  "bot_id": "bot_caf4569262e34721adcca650b297151e",
+  "bot_signer_secret": "sk_c884e8ba06a74ac39933c3d7d80224c5",
+  "dev_token": "eyJhbGciOiJIUzM4NCJ9.eyJzdWIiOiJ1c3JfZGExZDVjMGI1MGU4NGM0ZTljYWFiYzU2ZGNiYmIyOWQiLCJ1c2VybmFtZSI6ImRlditlMmUxIiwicm9sZSI6IkRFVkVMT1BFUiIsInRva2VuVHlwZSI6IkFDQ0VTUyIsImlhdCI6MTc3OTgxMTczMywiZXhwIjoxNzgzNDExNzMzfQ.N7ckl15VlgEEEM8hEfWCAa3wZZygSh7xk8FUwOybp4egqh8b9DsQhA9qZjbLa-zU",
+  "updated_at": "2026-05-26T16:08:59.102223+00:00"
+}
+</file>
+
+<file path="scripts/debug_send_signal.py">
+#!/usr/bin/env python3
+"""Debug helper: read provisioning state, compute HMAC signature, POST to /api/v1/signals and print request+response.
+
+Usage (from project root):
+  python local-executor-client/scripts/debug_send_signal.py --state /path/to/e2e_provision_state.json --base https://marcus-api.tromoi.xyz
+
+Inside docker where state is mounted at /state use:
+  python /app/scripts/debug_send_signal.py --state /state/e2e_provision_state.json --base https://marcus-api.tromoi.xyz
+"""
+⋮----
+def canonical_json(obj: dict) -> str
+⋮----
+def generate_hmac(payload: dict, secret: str, timestamp: str) -> str
+⋮----
+message = f"{timestamp}\n{canonical_json(payload)}".encode("utf-8")
+key = secret.encode("utf-8")
+⋮----
+def main()
+⋮----
+p = argparse.ArgumentParser()
+⋮----
+args = p.parse_args()
+⋮----
+state_path = Path(args.state)
+⋮----
+state = json.loads(state_path.read_text(encoding="utf-8"))
+bot_api_key = state.get("bot_api_key")
+bot_signer_secret = state.get("bot_signer_secret")
+bot_id = state.get("bot_id")
+⋮----
+# Example payload (use the one from your error if you prefer)
+payload = {
+⋮----
+# signalId is required by the API; generate a UUIDv4 if missing
+⋮----
+base = args.base.rstrip("/")
+url = f"{base}/api/v1/signals"
+⋮----
+timestamp = str(int(time.time() * 1000))
+⋮----
+body = canonical_json(payload)
+⋮----
+headers = {"Content-Type": "application/json"}
+⋮----
+sig = generate_hmac(payload, bot_signer_secret, timestamp)
+⋮----
+sig = None
+⋮----
+r = requests.post(url, headers=headers, data=body, timeout=10)
+</file>
+
+<file path="src/marcus_local_executor.egg-info/dependency_links.txt">
+
+</file>
+
+<file path="src/marcus_local_executor.egg-info/entry_points.txt">
+[console_scripts]
+local-executor = local_executor.cli:main
+</file>
+
+<file path="src/marcus_local_executor.egg-info/PKG-INFO">
+Metadata-Version: 2.4
+Name: marcus-local-executor
+Version: 0.1.0
+Summary: Local Executor core engine for Marcus trader-side signal execution
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: ccxt<5.0,>=4.2
+Requires-Dist: websockets<14.0,>=12.0
+
+﻿# Marcus Local Executor Client
+
+This repository contains only the trader-side local executor runtime.
+
+## Responsibilities
+- Maintain a resilient WebSocket connection to the dispatcher.
+- Perform subscribe handshake and ack validation.
+- Auto-reconnect with exponential backoff.
+- Monitor protocol heartbeat with ping/pong fallback.
+- Execute incoming signals via the configured exchange account.
+
+## Runtime Contract
+- Envelope types:
+  - signal
+  - heartbeat
+  - ack
+  - system
+- Unsupported or malformed frames are ignored and counted.
+
+## Signal Payload Contract
+
+The executor processes signal payloads with the following schema:
+
+### Required Fields
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `signal_id` | string | Unique signal identifier | `"sig-20260407-001"` |
+| `action` | string | Trading action | `"OPEN_LONG"` |
+| `symbol` | string | Trading pair (base or base/quote format) | `"BTCUSDT"` or `"BTC/USDT"` |
+
+### Optional Fields
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `amount` / `quantity` / `size` | float | Order amount (coins to trade) | `0.5` |
+| `order_type` | string | Order type: `"market"` or `"limit"` | `"market"` |
+| `price` / `limit_price` / `limitPrice` | float | Limit order price (required if `order_type="limit"`) | `65000.50` |
+| `time_in_force` | string | Time in force: `"GTC"`, `"IOC"`, `"FOK"`, etc. | `"GTC"` |
+| `asset_pair` / `assetPair` | string | Alternative symbol field | `"ETHUSDT"` |
+| `metadata` | object | Additional context | `{"strategy": "sma"}` |
+
+### Valid Actions
+
+- `OPEN_LONG` - Open long position (buy)
+- `CLOSE_LONG` - Close long position (sell, reduce_only=true)
+- `OPEN_SHORT` - Open short position (sell)
+- `CLOSE_SHORT` - Close short position (buy, reduce_only=true)
+- `BUY` - Alias for OPEN_LONG
+- `SELL` - Alias for CLOSE_LONG
+- `SELL_SHORT` - Alias for OPEN_SHORT
+- `BUY_TO_COVER` - Alias for CLOSE_SHORT
+
+### Symbol Normalization
+
+The executor normalizes symbols to CCXT format (`BASE/QUOTE`):
+
+```
+BTCUSDT     → BTC/USDT
+ethusdt     → ETH/USDT
+BTC/USDT    → BTC/USDT (unchanged)
+eth/usdt    → ETH/USDT
+```
+
+Supported quote currencies: USDT, USDC, BUSD
+
+### Examples
+
+**Minimal signal (market order):**
+```json
+{
+  "signal_id": "sig-001",
+  "action": "OPEN_LONG",
+  "symbol": "BTCUSDT"
+}
+```
+
+**Market order with amount:**
+```json
+{
+  "signal_id": "sig-002",
+  "action": "OPEN_LONG",
+  "symbol": "BTCUSDT",
+  "amount": 0.5
+}
+```
+
+**Limit order:**
+```json
+{
+  "signal_id": "sig-003",
+  "action": "OPEN_LONG",
+  "symbol": "BTCUSDT",
+  "order_type": "limit",
+  "price": 65000.50,
+  "amount": 0.5,
+  "time_in_force": "GTC"
+}
+```
+
+**Close position:**
+```json
+{
+  "signal_id": "sig-004",
+  "action": "CLOSE_LONG",
+  "symbol": "BTCUSDT",
+  "amount": 0.5
+}
+```
+
+### Validation Rules
+
+1. **Required fields must be present** and non-empty
+2. **Action must be one of the valid actions** (case-insensitive, normalized to uppercase)
+3. **Symbol must resolve to a valid trading pair** (min 2 chars)
+4. **Amount (if provided) must be > 0**
+5. **Limit orders require price field** with numeric value
+6. **Price (if provided) must be numeric and > 0**
+7. **Order type must be "market" or "limit"** (case-insensitive)
+
+### Error Responses
+
+When validation fails, ExecutionResult contains:
+- `mode`: `"error"`
+- `errors`: List of validation error messages
+- `details`: Original signal and attempted order
+
+Example error response:
+```python
+ExecutionResult(
+    mode="error",
+    order_id=None,
+    errors=["Invalid action: INVALID_ACTION. Must be one of ..."],
+    details={"signal": {...}}
+)
+```
+
+## Requirements
+- Python 3.10+
+
+## Setup
+1. Create `.env` from `.env.example` and fill values.
+2. Install:
+
+```bash
+pip install -e .
+```
+
+## Run
+```bash
+python local_executor.py
+```
+
+or
+
+```bash
+local-executor
+```
+
+## Test
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Execution Mode
+Set `EXECUTION_MODE` to `dry-run` for safe logging, or `live` to place orders via CCXT.
+
+## Contract Fixtures
+- WebSocket contract fixtures live in `tests/fixtures/contracts`.
+- Compatibility checks live in `tests/test_contract_compatibility.py`.
+- Signal validation tests live in `tests/test_engine.py` (SignalSchemaValidationTest and CcxtSignalExecutorBuildOrderTest)
+</file>
+
+<file path="src/marcus_local_executor.egg-info/requires.txt">
+ccxt<5.0,>=4.2
+websockets<14.0,>=12.0
+</file>
+
+<file path="src/marcus_local_executor.egg-info/SOURCES.txt">
+README.md
+pyproject.toml
+src/local_executor/__init__.py
+src/local_executor/cli.py
+src/local_executor/config.py
+src/local_executor/engine.py
+src/local_executor/env_loader.py
+src/local_executor/execution.py
+src/local_executor/execution_event_transport.py
+src/local_executor/execution_state_engine.py
+src/local_executor/local_store.py
+src/local_executor/recovery_manager.py
+src/local_executor/ws_client.py
+src/marcus_local_executor.egg-info/PKG-INFO
+src/marcus_local_executor.egg-info/SOURCES.txt
+src/marcus_local_executor.egg-info/dependency_links.txt
+src/marcus_local_executor.egg-info/entry_points.txt
+src/marcus_local_executor.egg-info/requires.txt
+src/marcus_local_executor.egg-info/top_level.txt
+tests/test_contract_compatibility.py
+tests/test_engine.py
+tests/test_execution_events.py
+tests/test_ws_client.py
+</file>
+
+<file path="src/marcus_local_executor.egg-info/top_level.txt">
+local_executor
+</file>
+
+<file path="tests/test_end2end_provision_and_connect.py">
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "end2end_provision_and_connect.py"
+⋮----
+@pytest.fixture(scope="module")
+def provision_script()
+⋮----
+spec = importlib.util.spec_from_file_location("end2end_provision_and_connect", SCRIPT_PATH)
+module = importlib.util.module_from_spec(spec)
+⋮----
+def test_extract_ws_token_from_nested_subscription_response(provision_script)
+⋮----
+payload = {
+⋮----
+def test_subscribe_bot_recovers_existing_subscription(monkeypatch, provision_script)
+⋮----
+class Response
+⋮----
+def __init__(self, status_code: int, json_data: dict, text: str)
+⋮----
+def json(self)
+⋮----
+def raise_for_status(self)
+⋮----
+post_calls = []
+get_calls = []
+⋮----
+def fake_post(url, headers=None, timeout=None)
+⋮----
+def fake_get(url, headers=None, timeout=None)
+⋮----
+result = provision_script.subscribe_bot("https://example.test", "trader-token", "bot_1")
+</file>
+
+<file path=".gitignore">
+__pycache__/
+</file>
+
+<file path="ARCHITECTURE.md">
+# Kiến trúc Hệ thống Local Executor Client
+
+## 1. Tổng quan (Overview)
+Dự án là một Python-based Executor Client, thành phần then chốt trong hệ thống giao dịch Marcus. Nhiệm vụ chính là nhận tín hiệu từ Cloud Backend và thực thi lệnh ngay lập tức trên sàn giao dịch của người dùng để giảm thiểu độ trễ và tăng tính bảo mật (API Key được lưu trữ cục bộ, không rời khỏi máy người dùng).
+
+## 2. Bản đồ Module (Module Map)
+
+### [CLI]
+- **File**: `src/local_executor/cli.py`
+- **Responsibility**: Khởi tạo ứng dụng, nạp cấu hình từ biến môi trường và thiết lập logging.
+- **Depends on**: `ExecutorConfig`, `LocalExecutorEngine`, `env_loader`.
+- **Called by**: `local_executor.py` (root wrapper), `project.scripts`.
+- **Key decision**: Tách biệt logic nạp môi trường (`env_loader`) khỏi logic khởi chạy engine.
+
+### [Engine]
+- **File**: `src/local_executor/engine.py`
+- **Responsibility**: Điều phối chính luồng nhận tín hiệu và đẩy các bản tin giám sát (audit-push).
+- **Depends on**: `ResilientWebSocketClient`, `CcxtSignalExecutor`, `ExecutorConfig`.
+- **Called by**: `cli.py`.
+- **Key decision**: Sử dụng `asyncio.wait` với `FIRST_COMPLETED` để quản lý đồng thời kết nối WebSocket và luồng đồng bộ số dư (`_balance_sync_loop`).
+
+### [Executor]
+- **File**: `src/local_executor/execution.py`
+- **Responsibility**: Kiểm tra tính hợp lệ (validate) của tín hiệu và thực thi lệnh giao dịch qua thư viện CCXT.
+- **Depends on**: `ccxt`, `ExecutorConfig`.
+- **Called by**: `LocalExecutorEngine`.
+- **Key decision**: Hỗ trợ chế độ `dry-run` để kiểm tra logic mà không thực hiện giao dịch thật.
+
+### [WebSocket Client]
+- **File**: `src/local_executor/ws_client.py`
+- **Responsibility**: Duy trì kết nối WebSocket bền bỉ, xử lý xác thực HMAC và phân loại tin nhắn từ backend.
+- **Depends on**: `websockets`, `hmac`, `hashlib`.
+- **Called by**: `LocalExecutorEngine`.
+- **Key decision**: Handshake sử dụng HMAC-SHA256 để đảm bảo tính xác thực của client.
+
+### [Local Store]
+- **File**: `src/local_executor/local_store.py`
+- **Responsibility**: Lưu trữ bền bỉ trạng thái lệnh và các sự kiện thực thi vào cơ sở dữ liệu SQLite cục bộ.
+- **Depends on**: `sqlite3`.
+- **Called by**: `ExecutionStateEngine`, `ExecutionRecoveryManager`.
+- **Key decision**: Áp dụng Outbox pattern cho việc gửi ACK để đảm bảo dữ liệu không bị mất khi mạng lỗi.
+
+## 3. Luồng dữ liệu (Data Flow)
+
+Hệ thống vận hành theo mô hình hướng sự kiện (event-driven):
+
+1. **Nhận tín hiệu**: 
+   - Backend Cloud -> `ResilientWebSocketClient` (Signal Frame) -> `LocalExecutorEngine`.
+2. **Thực thi lệnh**:
+   - `LocalExecutorEngine` -> `CcxtSignalExecutor` -> Sàn giao dịch (Exchange via CCXT).
+3. **Phản hồi & Giám sát**:
+   - Sàn giao dịch -> `CcxtSignalExecutor` (Result) -> `ExecutionEvent`.
+   - `ExecutionEvent` -> `LocalExecutionStore` (Save to SQLite) -> `ExecutionACK` -> Backend Cloud.
+4. **Đồng bộ trạng thái**:
+   - `_balance_sync_loop` định kỳ lấy số dư từ sàn và gửi 'audit-push' về backend để cập nhật dashboard.
+
+## 4. Phụ thuộc bên ngoài (External Dependencies)
+
+- **CCXT**: Thư viện tiêu chuẩn để tương tác với hàng trăm sàn giao dịch Crypto khác nhau.
+- **websockets**: Dùng để duy trì kết nối real-time hai chiều với backend.
+- **sqlite3**: Dùng cho lưu trữ trạng thái cục bộ, hỗ trợ phục hồi sau sự cố.
+
+## 5. Các khu vực rủi ro (Risk Areas)
+
+- **Đồng bộ hóa trạng thái**: Việc duy trì sự đồng nhất giữa Local Store, Backend và Exchange trong điều kiện mạng không ổn định là thách thức lớn nhất (đang được xử lý bởi `RecoveryManager`).
+- **Độ trễ thực thi**: Hiệu năng phụ thuộc vào tốc độ phản hồi của thư viện CCXT và mạng từ máy người dùng đến API của sàn.
+- **Bảo mật API Key**: API Key được lưu tại file `.env` cục bộ. Người dùng cần được khuyến cáo bảo vệ file này tuyệt đối.
+- **Xử lý Frame lỗi**: Hiện tại chỉ mới dừng lại ở việc tăng counter lỗi trong `ws_client.py`, cần bổ sung thêm cơ chế cảnh báo chủ động.
+
+---
+*Tài liệu này được tạo tự động sau quá trình khám phá codebase.*
+</file>
+
+<file path="local_executor.py">
+# pyright: reportMissingImports=false
+</file>
+
+<file path="scripts/end2end_provision_and_connect.py">
+#!/usr/bin/env python3
+"""End-to-end provisioning script:
+- create developer user, login
+- create bot as developer
+- create trader user, login
+- subscribe trader to bot to obtain `ws_token`
+- persist provisioning state for the client to consume
+
+Usage:
+  python scripts/end2end_provision_and_connect.py --base-url https://marcus-api.tromoi.xyz
+
+This script tries common register/login paths and subscription endpoints used by the platform.
+"""
+⋮----
+COMMON_REGISTER_PATHS = [
+⋮----
+# "/auth/register",
+# "/api/auth/register",
+⋮----
+COMMON_LOGIN_PATHS = [
+⋮----
+# "/auth/login",
+# "/api/auth/login",
+⋮----
+DEFAULT_STATE_FILE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
+⋮----
+def _extract_ws_token(data: object, bot_id: str | None = None) -> str | None
+⋮----
+token = _extract_ws_token(item, bot_id=bot_id)
+⋮----
+value = data.get(key)
+⋮----
+items = data.get(list_key)
+⋮----
+item_bot_id = item.get("botId") or item.get("bot_id") or item.get("id")
+⋮----
+def fetch_existing_subscription(base: str, trader_token: str, bot_id: str) -> dict | None
+⋮----
+headers = {"Authorization": f"Bearer {trader_token}"}
+candidates = [
+⋮----
+url = base.rstrip("/") + p
+⋮----
+r = requests.get(url, headers=headers, timeout=10)
+txt_preview = (r.text or "")[:800].replace("\n", " ")
+⋮----
+data = r.json()
+ws_token = _extract_ws_token(data, bot_id=bot_id)
+⋮----
+def try_post(base: str, paths: list[str], json_body: dict, headers: dict | None = None)
+⋮----
+headers = headers or {}
+⋮----
+r = requests.post(url, json=json_body, headers=headers, timeout=10)
+# verbose logging for diagnostics
+⋮----
+body_preview = json.dumps(json_body, ensure_ascii=False)
+⋮----
+body_preview = str(json_body)
+txt = r.text or ""
+txt_preview = txt[:400].replace("\n", " ")
+⋮----
+def load_state(state_file: Path) -> dict
+⋮----
+def save_state(state_file: Path, state: dict) -> None
+⋮----
+def try_login(base: str, email: str, password: str)
+⋮----
+# Try both email and username forms for login payloads
+bodies = [
+⋮----
+r = try_post(base, COMMON_LOGIN_PATHS, b)
+⋮----
+def _extract_user_id_from_login(data: object) -> str | None
+⋮----
+v = data.get(key)
+⋮----
+# nested user object
+nested = v.get("id") or v.get("userId") or v.get("user_id")
+⋮----
+# try common nested locations
+data_obj = data.get("data") if isinstance(data.get("data"), dict) else None
+⋮----
+def try_register(base: str, email: str, password: str, display_name: str | None = None, role: str | None = None)
+⋮----
+username = email.split("@")[0]
+body = {"email": email, "password": password, "username": username}
+⋮----
+# some APIs expect `name` or `displayName` or `username`
+body_alt = dict(body)
+⋮----
+def create_bot(base: str, dev_token: str, bot_name: str = "e2e-bot", bot_id: str | None = None)
+⋮----
+headers = {"Authorization": f"Bearer {dev_token}"}
+payload = {
+⋮----
+r = requests.post(url, json=payload, headers=headers, timeout=10)
+# log response for debugging payload/permission issues
+⋮----
+payload_preview = json.dumps(payload, ensure_ascii=False)
+⋮----
+payload_preview = str(payload)
+resp_txt = (r.text or "").replace("\n", " ")[:800]
+⋮----
+# try listing bots as fallback
+⋮----
+list_url = base.rstrip("/") + p
+lr = requests.get(list_url, headers=headers, timeout=10)
+lr_preview = (lr.text or "")[:400].replace("\n", " ")
+⋮----
+data = lr.json()
+# try to pick first bot id from common keys
+first = None
+⋮----
+item = data[0]
+first = item.get("bot_id") or item.get("botId") or item.get("id")
+⋮----
+# maybe wrapped
+items = data.get("items") or data.get("bots") or data.get("data")
+⋮----
+item = items[0]
+⋮----
+# if all fails, raise last known HTTPError
+⋮----
+def subscribe_bot(base: str, trader_token: str, bot_id: str)
+⋮----
+url = base.rstrip("/") + f"/api/v1/subscriptions/{bot_id}"
+⋮----
+r = requests.post(url, headers=headers, timeout=10)
+⋮----
+existing = fetch_existing_subscription(base, trader_token, bot_id)
+⋮----
+# attempt to upsert routing subscriber as a fallback (routing endpoints are permitAll)
+⋮----
+upsert_paths = ["/api/v1/routing/subscribers", "/routing/subscribers"]
+payload = {"botId": bot_id, "userId": state.get("trader_id")}
+# try with trader token header first, then unauthenticated
+heads = [{"Authorization": f"Bearer {trader_token}"}, {}]
+⋮----
+ru = base.rstrip("/") + p
+ru_r = requests.post(ru, json=payload, headers=h or None, timeout=10)
+ru_preview = str(ru_r.text)[:200].replace("\n", " ")
+⋮----
+def build_handshake(bot_id: str, ws_token: str, protocol_version: str = "1.0") -> dict
+⋮----
+timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+⋮----
+payload_json = json.dumps(payload, separators=(",",":"))
+payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+message = f"{bot_id}|{payload['timestamp']}|{payload_b64}".encode("utf-8")
+digest = hmac.new(ws_token.encode("utf-8"), message, hashlib.sha256).digest()
+signature = base64.b64encode(digest).decode("ascii")
+⋮----
+def main()
+⋮----
+parser = argparse.ArgumentParser()
+⋮----
+args = parser.parse_args()
+⋮----
+base = args.base_url.rstrip("/")
+state_file = Path(args.state_file)
+state = load_state(state_file) if args.reuse_state else {}
+⋮----
+state = {}
+⋮----
+resp = try_register(base, args.dev_email, args.dev_password, display_name="e2e-dev", role="DEVELOPER")
+⋮----
+login = try_login(base, args.dev_email, args.dev_password)
+⋮----
+dev_token = login.get("accessToken") or login.get("token") or login.get("access_token") or login.get("data", {}).get("token")
+⋮----
+# probe common bot listing endpoints using the dev token to debug permissions
+bot_list_paths = ["/api/v1/bots/register", "/api/bots", "/bots"]
+⋮----
+lr = requests.get(url, headers=headers, timeout=10)
+txt = lr.text[:400].replace('\n',' ')
+⋮----
+dev_token = state["dev_token"]
+⋮----
+bot_id = state.get("bot_id")
+bot_api_key = state.get("bot_api_key")
+bot_signer_secret = state.get("bot_signer_secret")
+⋮----
+bot = create_bot(base, dev_token, bot_name=args.bot_name, bot_id=bot_id)
+bot_id = bot.get("bot_id") or bot.get("botId") or bot.get("id") or bot_id
+bot_api_key = bot_api_key or bot.get("apiKey") or bot.get("api_key") or bot.get("botApiKey")
+bot_signer_secret = bot_signer_secret or bot.get("rawSecret") or bot.get("raw_secret") or bot.get("botSignerSecret")
+⋮----
+trader_token = state.get("trader_token")
+⋮----
+_ = try_register(base, args.trader_email, args.trader_password, display_name="e2e-trader", role="TRADER")
+⋮----
+tr_login = try_login(base, args.trader_email, args.trader_password)
+⋮----
+trader_token = tr_login.get("accessToken") or tr_login.get("token") or tr_login.get("access_token")
+trader_id = _extract_user_id_from_login(tr_login)
+⋮----
+trader_id = state.get("trader_id")
+⋮----
+ws_token = state.get("ws_token")
+⋮----
+sub = subscribe_bot(base, trader_token, bot_id)
+ws_token = _extract_ws_token(sub, bot_id=bot_id)
+⋮----
+sub = existing
+⋮----
+# Legacy verification path can be enabled explicitly if a real WS endpoint is available.
+ws_url = base.replace("http://", "ws://").replace("https://", "wss://") + args.ws_path
+</file>
+
+<file path="scripts/probe_auth_endpoints.py">
+#!/usr/bin/env python3
+⋮----
+base='https://marcus-api.tromoi.xyz'
+paths=['/auth/login','/api/auth/login','/api/v1/auth/login','/auth/register','/api/auth/register','/api/v1/auth/register']
+⋮----
+url=base.rstrip('/')+p
+⋮----
+r=requests.post(url,json={'email':'dev+e2e@example.com','password':'Password123!'},timeout=10)
+</file>
+
+<file path="scripts/probe_ws_handshake.py">
+#!/usr/bin/env python3
+"""Probe WebSocket handshake status codes for common dispatcher paths.
+
+Reads `.e2e_provision_state.json` for host and token, then tries candidate paths.
+Prints exception status codes and response headers to help diagnose InvalidStatusCode.
+"""
+⋮----
+STATE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
+⋮----
+def load_state() -> dict
+⋮----
+async def try_connect(url: str, token: str) -> None
+⋮----
+# websockets exposes the status code on this exception
+code = getattr(e, "status_code", None)
+⋮----
+async def main()
+⋮----
+state = load_state()
+token = state.get("ws_token") or state.get("subscription_response", {}).get("wsToken")
+⋮----
+# Host and port from user-provided dispatcher
+host = "171.244.195.150:8081"
+⋮----
+candidates = [
+⋮----
+url = f"ws://{host}{p}"
+</file>
+
+<file path="scripts/run_signal_smoke.py">
+#!/usr/bin/env python3
+"""Run a quick signal -> executor smoke test (dry-run).
+
+- Reads provisioning state from `.e2e_provision_state.json` for `bot_id`.
+- Sets minimal environment variables required by `ExecutorConfig`.
+- Calls `CcxtSignalExecutor.execute_signal` for two synthetic signals.
+"""
+⋮----
+STATE_FILE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
+⋮----
+def load_state() -> dict
+⋮----
+def prepare_env_from_state(state: dict) -> None
+⋮----
+# Minimal envs required by ExecutorConfig.from_env
+⋮----
+# WS url/token unused for direct executor call, but set for completeness
+⋮----
+# Exchange dummy values for dry-run
+⋮----
+async def run_smoke()
+⋮----
+state = load_state()
+⋮----
+# configure logging
+⋮----
+logger = logging.getLogger("signal-smoke")
+⋮----
+config = ExecutorConfig.from_env()
+executor = CcxtSignalExecutor(config=config, logger=logger)
+⋮----
+# two signals: market open and limit close
+signals = [
+⋮----
+result = await executor.execute_signal(s)
+⋮----
+def main()
+</file>
+
+<file path="scripts/ws_simulator.py">
+"""Simple WebSocket simulator to reproduce handshake + immediate close behavior.
+
+Run this locally and point `SYSTEM_WS_URL` to ws://localhost:8765 to test the client.
+"""
+⋮----
+LOG = logging.getLogger("ws_simulator")
+⋮----
+async def handler(ws, path)
+⋮----
+raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+⋮----
+# Reply with handshake-ack then close after short delay
+ack = {"type": "handshake-ack", "payload": {"status": "ok", "ack_type": "handshake"}}
+⋮----
+def main()
+⋮----
+port = int(os.getenv("WS_SIMULATOR_PORT", "9876"))
+stop = asyncio.Event()
+⋮----
+async def _run()
+⋮----
+server = await websockets.serve(handler, "0.0.0.0", port)
+⋮----
+def _signal(_sig, _frame)
+</file>
+
+<file path="src/local_executor/cli.py">
+def main() -> None
+⋮----
+async def _run() -> None
+⋮----
+config = ExecutorConfig.from_env()
+⋮----
+logger = logging.getLogger(__name__)
+stop_event = asyncio.Event()
+⋮----
+loop = asyncio.get_running_loop()
+⋮----
+# Windows event loop may not support signal handlers.
+⋮----
+db_path = Path(os.getenv("EXECUTOR_DB_PATH", "executor_state.db"))
+local_store = LocalExecutionStore(db_path=db_path, logger=logging.getLogger("local_store"))
+⋮----
+engine = LocalExecutorEngine(config=config, local_store=local_store)
+⋮----
+def _configure_logging(level: str) -> None
+</file>
+
+<file path="src/local_executor/env_loader.py">
+def load_env_file(path: str | Path = ".env") -> None
+⋮----
+"""Load key-value pairs from a .env file into process environment."""
+env_path = Path(path)
+⋮----
+line = raw_line.strip()
+⋮----
+key = key.strip()
+value = value.strip().strip('"').strip("'")
+</file>
+
+<file path="tests/conftest.py">
+"""Pytest configuration for local-executor-client tests."""
+⋮----
+# Add src/ to path for imports
+src_path = Path(__file__).parent.parent / "src"
+</file>
+
+<file path="tests/fixtures/contracts/ws_ack_invalid_v1.json">
+{
+  "type": "ack",
+  "payload": {
+    "status": "denied",
+    "ack_type": "subscribe"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_ack_valid_v1.json">
+{
+  "type": "ack",
+  "payload": {
+    "status": "ok",
+    "ack_type": "subscribe"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_handshake_subscribe_v1.json">
+{
+  "type": "subscribe",
+  "payload": {
+    "bot_id": "bot-fixture-01",
+    "protocol_version": "1.0",
+    "stream": "signal_execution",
+    "mode": "consume_only"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_heartbeat_v1.json">
+{
+  "type": "heartbeat",
+  "payload": {
+    "status": "ok"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_signal_envelope_v1.json">
+{
+  "type": "signal",
+  "payload": {
+    "signal_id": "fixture-sig-1",
+    "action": "OPEN_LONG",
+    "symbol": "BTCUSDT"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_unsupported_v1.json">
+{
+  "type": "snapshot",
+  "payload": {
+    "items": []
+  }
+}
+</file>
+
+<file path="tests/test_chaos_recovery.py">
+@pytest.mark.asyncio
+async def test_recovery_discovery_ignores_closed_signals()
+⋮----
+"""
+    SIMULATED CHAOS: Reboot executor and ensure auto-discovery only picks up 
+    dangling (open) signals and ignores fully completed (closed) ones.
+    """
+# Setup clean DB
+store = LocalExecutionStore(":memory:")
+⋮----
+# Signal 1: Completed and closed (SHOULD BE IGNORED)
+⋮----
+# Signal 2: Half-baked, dangling due to process crash (SHOULD BE RECOVERED)
+⋮----
+# Mock out state engine
+mock_engine = MagicMock()
+⋮----
+# Instantiate Recovery Manager (simulating Reboot)
+mgr = ExecutionRecoveryManager(store, mock_engine)
+⋮----
+# Act: Run bootstrap phase
+discovered = await mgr._bootstrap_signals([])
+⋮----
+# Assert: Discovery strictly filters active boundaries
+⋮----
+@pytest.mark.asyncio
+async def test_clean_boundary_expiry_enforcement()
+⋮----
+"""
+    Verify the clean boundary deadline enforcer proactively drops expired signals.
+    """
+config = ExecutorConfig(
+executor = CcxtSignalExecutor(config)
+⋮----
+# Payload A: Legitimate & fresh
+fresh_payload = {
+⋮----
+"cancel_after_timestamp": time.time() + 600 # expires in 10 min
+⋮----
+result_fresh = await executor.execute_signal(fresh_payload)
+⋮----
+# Payload B: Rotted / Delayed arrival (Expires 10s AGO)
+stale_payload = {
+result_stale = await executor.execute_signal(stale_payload)
+</file>
+
+<file path="src/local_executor/__init__.py">
+"""Marcus Local Executor package."""
+⋮----
+__all__ = [
+</file>
+
+<file path="src/local_executor/execution_event_transport.py">
+"""
+Execution Event Transport Layer (EVT-11)
+
+Handles bidirectional communication of execution events between:
+- Backend: sends execution_event frames (SIGNAL_ACCEPTED, ORDER_PLACED, etc.)
+- Python Client: receives events, manages local state, sends execution_ack
+
+Protocol:
+- Inbound: execution_event {eventId, signalId, sequence, eventType, sentAt, exchangeTime, payload}
+- Outbound: execution_ack {eventId, signalId, status, errorCode, errorMessage, receivedAt}
+"""
+⋮----
+class ExecutionEventType(str, Enum)
+⋮----
+"""9 event types from backend contract."""
+SIGNAL_ACCEPTED = "SIGNAL_ACCEPTED"
+SIGNAL_REJECTED = "SIGNAL_REJECTED"
+ORDER_PLACED = "ORDER_PLACED"
+ORDER_FILLED = "ORDER_FILLED"
+ORDER_FAILED = "ORDER_FAILED"
+ORDER_CANCELED = "ORDER_CANCELED"
+POSITION_OPENED = "POSITION_OPENED"
+POSITION_UPDATED = "POSITION_UPDATED"
+POSITION_CLOSED = "POSITION_CLOSED"
+⋮----
+class ACKStatus(str, Enum)
+⋮----
+"""ACK response status."""
+OK = "OK"
+ERROR = "ERROR"
+⋮----
+class ACKErrorCode(str, Enum)
+⋮----
+"""ACK error codes from backend contract."""
+OUT_OF_ORDER = "OUT_OF_ORDER"
+⋮----
+INVALID_STATE = "INVALID_STATE"
+UNAUTHORIZED = "UNAUTHORIZED"
+DUPLICATE_EVENT = "DUPLICATE_EVENT"
+INVALID_SEQUENCE = "INVALID_SEQUENCE"
+INTERNAL_ERROR = "INTERNAL_ERROR"
+⋮----
+@dataclass(frozen=True, slots=True)
+class ExecutionEvent
+⋮----
+"""
+    Immutable execution event from backend.
+    
+    Represents state transition in execution lifecycle:
+    - Signal acceptance/rejection
+    - Order state changes (placed, filled, failed, canceled)
+    - Position state changes (opened, updated, closed)
+    """
+event_id: str
+signal_id: str
+sequence: int
+event_type: ExecutionEventType
+sent_at: datetime
+exchange_time: datetime | None  # nullable
+payload: dict[str, Any]
+received_at: datetime | None = None  # set on client side
+⋮----
+def is_position_closing(self) -> bool
+⋮----
+"""Returns True if this event closes a position."""
+⋮----
+@staticmethod
+    def from_json(data: dict[str, Any]) -> ExecutionEvent
+⋮----
+"""Parse ExecutionEvent from backend JSON envelope."""
+⋮----
+def to_json(self) -> dict[str, Any]
+⋮----
+"""Serialize ExecutionEvent to JSON."""
+⋮----
+@dataclass(frozen=True, slots=True)
+class ExecutionACK
+⋮----
+"""
+    Immutable execution ACK response to backend.
+    
+    Sent by client in response to execution_event frame.
+    """
+⋮----
+status: ACKStatus
+error_code: ACKErrorCode | None = None
+error_message: str | None = None
+received_at: datetime | None = None
+⋮----
+@staticmethod
+    def ok(event_id: str, signal_id: str) -> ExecutionACK
+⋮----
+"""Create success ACK."""
+⋮----
+"""Create error ACK."""
+⋮----
+"""Serialize ExecutionACK to JSON envelope."""
+⋮----
+EventHandler = Callable[[ExecutionEvent], Awaitable[None]]
+⋮----
+class ExecutionEventTransport
+⋮----
+"""
+    Bidirectional transport for execution events.
+    
+    Responsibilities:
+    - Parse execution_event frames from WebSocket
+    - Invoke event handler (local state engine)
+    - Collect ACK responses from handler
+    - Send execution_ack frames back to backend
+    - Retry failed ACKs with exponential backoff
+    - Track ACK delivery status
+    """
+⋮----
+async def handle_execution_event_frame(self, frame: dict[str, Any]) -> ExecutionACK
+⋮----
+"""
+        Process inbound execution_event frame.
+        
+        Steps:
+        1. Parse ExecutionEvent from frame
+        2. Invoke event handler (which may throw validation errors)
+        3. If handler succeeds, return OK ACK
+        4. If handler fails, return ERROR ACK with error code
+        
+        Args:
+            frame: Raw JSON frame from backend
+            
+        Returns:
+            ExecutionACK to send back to backend
+        """
+⋮----
+event = ExecutionEvent.from_json(frame)
+⋮----
+# Invoke event handler (state engine)
+⋮----
+ack = ExecutionACK.ok(event.event_id, event.signal_id)
+⋮----
+ack = ExecutionACK.error(
+⋮----
+# Return generic error ACK
+⋮----
+# Track pending ACK for retry
+⋮----
+async def get_pending_acks(self) -> list[ExecutionACK]
+⋮----
+"""Get list of ACKs pending delivery."""
+⋮----
+async def mark_ack_delivered(self, event_id: str) -> None
+⋮----
+"""Mark ACK as successfully delivered (remove from pending)."""
+⋮----
+# Exceptions for event validation
+⋮----
+class EventValidationError(Exception)
+⋮----
+"""Base exception for event validation errors."""
+⋮----
+class EventSequenceError(EventValidationError)
+⋮----
+"""Event sequence number is out of order."""
+def __init__(self, expected_sequence: int, got_sequence: int)
+⋮----
+class PositionClosedError(EventValidationError)
+⋮----
+"""Received event after position already closed."""
+def __init__(self, signal_id: str)
+⋮----
+class InvalidStateTransitionError(EventValidationError)
+⋮----
+"""Event represents invalid state transition."""
+def __init__(self, from_state: str, to_state: str, event_type: str)
+⋮----
+class DuplicateEventError(EventValidationError)
+⋮----
+"""Event was already processed."""
+def __init__(self, event_id: str)
+⋮----
+def _parse_datetime(value: str | None) -> datetime | None
+⋮----
+"""Parse ISO datetime string."""
+⋮----
+# Handle ISO format with or without microseconds/timezone
+⋮----
+# Remove timezone info for simplicity (assume UTC)
+⋮----
+value = value.split("+")[0]
+⋮----
+value = value[:-1]
+</file>
+
+<file path="src/local_executor/execution_state_engine.py">
+"""
+Execution State Engine (EVT-11/12)
+
+Orchestrates event validation and state transitions.
+
+Responsibilities:
+- Validate sequence numbers
+- Enforce state machine transitions
+- Update local state in store
+- Detect duplicates and late events
+- Enforce business rules (no events after position closed)
+"""
+⋮----
+class ExecutionStateEngine
+⋮----
+"""
+    Validates and applies execution events to local state.
+    
+    Enforces:
+    - Per-signal sequence ordering (1, 2, 3, ...)
+    - State machine transitions (Signal → Order → Position)
+    - Late event rejection (no events after position closed)
+    - Duplicate detection (event_id uniqueness)
+    """
+⋮----
+async def process_event(self, event: ExecutionEvent) -> None
+⋮----
+"""
+        Process execution event with full validation.
+        
+        Steps:
+        1. Check for duplicate (raise DuplicateEventError if found)
+        2. Get/create signal state
+        3. Check if position closed (raise PositionClosedError)
+        4. Validate sequence (raise EventSequenceError)
+        5. Validate state transition (raise InvalidStateTransitionError)
+        6. Update local state in store
+        
+        Raises:
+            DuplicateEventError: Event already processed
+            PositionClosedError: Position already closed
+            EventSequenceError: Sequence number out of order
+            InvalidStateTransitionError: Invalid state transition
+        """
+⋮----
+# Step 1: Check for duplicate using store-level existence check (O(1))
+⋮----
+# Step 2: Get/create signal state
+signal_state = await self._store.get_or_create_signal(event.signal_id)
+⋮----
+# Step 3: Check if position already closed
+⋮----
+# Step 4: Validate sequence
+expected_sequence = signal_state.last_sequence + 1
+⋮----
+# Step 5: Validate state transition
+⋮----
+# Step 6: Store event in local store
+stored_ok = await self._store.store_event(event)
+⋮----
+# Re-check whether it's a duplicate or a sequence conflict
+⋮----
+# Otherwise treat as sequence conflict
+⋮----
+# Step 7: Update signal state based on event type
+⋮----
+async def replay_event(self, event: ExecutionEvent) -> None
+⋮----
+"""
+        Apply a stored event during recovery replay.
+
+        Unlike `process_event`, replay does not store the event again or perform
+        duplicate checks, because events are already persisted in the local store.
+        """
+⋮----
+"""
+        Validate state machine transitions.
+        
+        State machines:
+        - Signal: ACCEPTED → OPEN | REJECTED → CLOSED
+        - Order: NONE → PLACED → FILLED|FAILED|CANCELED
+        - Position: NONE → OPENED → UPDATING → CLOSED
+        """
+event_type = event.event_type
+⋮----
+# Signal acceptance
+⋮----
+# Order transitions
+⋮----
+# Position transitions
+⋮----
+"""Update signal state based on event type."""
+⋮----
+now = event.exchange_time or event.sent_at
+⋮----
+# Signal state
+⋮----
+# Order state
+⋮----
+# Position state
+</file>
+
+<file path="tests/test_engine.py">
+# pyright: reportMissingImports=false
+⋮----
+class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase)
+⋮----
+async def test_should_forward_signal_to_handler(self) -> None
+⋮----
+received: list[dict[str, Any]] = []
+⋮----
+async def on_signal(payload: dict[str, Any]) -> None
+⋮----
+config = ExecutorConfig(
+engine = LocalExecutorEngine(config=config, on_signal=on_signal)
+⋮----
+class SignalSchemaValidationTest(unittest.TestCase)
+⋮----
+def test_should_accept_minimal_valid_signal(self) -> None
+⋮----
+signal = {
+⋮----
+def test_should_reject_missing_signal_id(self) -> None
+⋮----
+def test_should_reject_empty_signal_id(self) -> None
+⋮----
+def test_should_reject_missing_action(self) -> None
+⋮----
+def test_should_reject_invalid_action(self) -> None
+⋮----
+def test_should_accept_valid_actions(self) -> None
+⋮----
+def test_should_reject_missing_symbol(self) -> None
+⋮----
+def test_should_accept_asset_pair_as_symbol_alias(self) -> None
+⋮----
+def test_should_accept_assetPair_as_symbol_alias(self) -> None
+⋮----
+def test_should_accept_market_order_type(self) -> None
+⋮----
+def test_should_accept_limit_order_type_with_price(self) -> None
+⋮----
+def test_should_reject_limit_order_type_without_price(self) -> None
+⋮----
+def test_should_reject_invalid_order_type(self) -> None
+⋮----
+def test_should_accept_amount_as_quantity(self) -> None
+⋮----
+def test_should_accept_amount_as_size(self) -> None
+⋮----
+def test_should_reject_negative_amount(self) -> None
+⋮----
+def test_should_reject_zero_amount(self) -> None
+⋮----
+def test_should_reject_non_numeric_amount(self) -> None
+⋮----
+def test_should_reject_non_dictionary_payload(self) -> None
+⋮----
+def test_should_accept_optional_fields(self) -> None
+⋮----
+class CcxtSignalExecutorBuildOrderTest(unittest.TestCase)
+⋮----
+def setUp(self) -> None
+⋮----
+def test_should_normalize_symbol_to_ccxt_format(self) -> None
+⋮----
+order = self.executor._build_order(signal)
+⋮----
+def test_should_handle_already_normalized_symbol(self) -> None
+⋮----
+def test_should_use_asset_pair_as_symbol(self) -> None
+⋮----
+def test_should_map_open_long_to_buy(self) -> None
+⋮----
+def test_should_map_close_long_to_sell_with_reduce_only(self) -> None
+⋮----
+def test_should_map_open_short_to_sell(self) -> None
+⋮----
+def test_should_map_close_short_to_buy_with_reduce_only(self) -> None
+⋮----
+def test_should_map_buy_alias_to_buy(self) -> None
+⋮----
+def test_should_map_sell_alias_to_sell_with_reduce_only(self) -> None
+⋮----
+def test_should_use_default_order_amount_when_missing(self) -> None
+⋮----
+def test_should_use_provided_amount(self) -> None
+⋮----
+def test_should_accept_quantity_as_amount_alias(self) -> None
+⋮----
+def test_should_default_to_market_order_type(self) -> None
+⋮----
+def test_should_accept_limit_order_with_price(self) -> None
+⋮----
+def test_should_accept_time_in_force_in_params(self) -> None
+⋮----
+class CcxtSignalExecutorMultiMarketTest(unittest.TestCase)
+⋮----
+def test_should_cache_exchanges_separately_and_set_correct_options(self) -> None
+⋮----
+executor = CcxtSignalExecutor(config)
+⋮----
+# We can mock the ccxt dependency or check _build_exchange output
+⋮----
+mock_spot = MagicMock()
+mock_future = MagicMock()
+⋮----
+# Set side effect to return spot or future based on the options defaultType passed to constructor
+def side_effect(config_dict)
+⋮----
+options = config_dict.get("options", {})
+default_type = options.get("defaultType")
+⋮----
+spot_ex = executor._get_exchange("SPOT")
+future_ex = executor._get_exchange("FUTURE")
+⋮----
+# Ensure calling it again returns the cached instances
+⋮----
+def test_backward_compatibility_with_mock_exchange(self) -> None
+⋮----
+mock_ex = "my-mocked-exchange"
+⋮----
+# When _exchange property is directly injected, _get_exchange should fall back to it
+</file>
+
+<file path="tests/test_execution_events.py">
+"""
+Tests for Phase 3 (EVT-11-14) execution event transport and state management.
+
+Coverage:
+- ExecutionEventTransport: frame parsing, ACK generation, error handling
+- LocalExecutionStore: SQLite persistence, state tracking, outbox pattern
+- ExecutionStateEngine: sequence validation, state transitions
+- ExecutionRecoveryManager: bootstrap, history pull, replay, exchange sync
+"""
+⋮----
+# ============ Fixtures ============
+⋮----
+@pytest.fixture
+def event_transport()
+⋮----
+"""Create ExecutionEventTransport for testing."""
+events_received = []
+⋮----
+async def on_event(event: ExecutionEvent)
+⋮----
+@pytest_asyncio.fixture
+async def local_store()
+⋮----
+"""Create in-memory SQLite store for testing."""
+store = LocalExecutionStore(db_path=":memory:")
+⋮----
+@pytest_asyncio.fixture
+async def state_engine(local_store)
+⋮----
+"""Create ExecutionStateEngine for testing."""
+⋮----
+@pytest_asyncio.fixture
+async def recovery_manager(local_store, state_engine)
+⋮----
+"""Create ExecutionRecoveryManager for testing."""
+⋮----
+# ============ ExecutionEvent Tests ============
+⋮----
+class TestExecutionEvent
+⋮----
+"""Test ExecutionEvent value object."""
+⋮----
+def test_from_json_success(self)
+⋮----
+"""Test parsing ExecutionEvent from backend JSON."""
+frame = {
+⋮----
+event = ExecutionEvent.from_json(frame)
+⋮----
+def test_is_position_closing(self)
+⋮----
+"""Test position-closing event detection."""
+# POSITION_CLOSED
+event1 = ExecutionEvent(
+⋮----
+# ORDER_FAILED
+event2 = ExecutionEvent(
+⋮----
+# ORDER_PLACED (not closing)
+event3 = ExecutionEvent(
+⋮----
+def test_ack_ok(self)
+⋮----
+"""Test creating success ACK."""
+ack = ExecutionACK.ok("evt-001", "sig-001")
+⋮----
+def test_ack_error(self)
+⋮----
+"""Test creating error ACK."""
+ack = ExecutionACK.error(
+⋮----
+# ============ ExecutionEventTransport Tests ============
+⋮----
+class TestExecutionEventTransport
+⋮----
+"""Test ExecutionEventTransport."""
+⋮----
+@pytest.mark.asyncio
+    async def test_handle_execution_event_success(self, event_transport)
+⋮----
+"""Test handling successful execution event."""
+⋮----
+ack = await transport.handle_execution_event_frame(frame)
+⋮----
+@pytest.mark.asyncio
+    async def test_handle_execution_event_error(self, event_transport)
+⋮----
+"""Test handling event that raises error."""
+async def failing_handler(event: ExecutionEvent)
+⋮----
+transport = ExecutionEventTransport(on_event=failing_handler)
+⋮----
+@pytest.mark.asyncio
+    async def test_get_pending_acks(self, event_transport)
+⋮----
+"""Test retrieving pending ACKs."""
+⋮----
+# Generate some ACKs
+⋮----
+pending = await transport.get_pending_acks()
+⋮----
+# Mark one as delivered
+⋮----
+# ============ LocalExecutionStore Tests ============
+⋮----
+class TestLocalExecutionStore
+⋮----
+"""Test LocalExecutionStore."""
+⋮----
+@pytest.mark.asyncio
+    async def test_get_or_create_signal(self, local_store)
+⋮----
+"""Test creating new signal state."""
+state = await local_store.get_or_create_signal("sig-001")
+⋮----
+@pytest.mark.asyncio
+    async def test_store_event(self, local_store)
+⋮----
+"""Test storing execution event."""
+event = ExecutionEvent(
+⋮----
+stored = await local_store.store_event(event)
+⋮----
+# Try to store duplicate
+stored_again = await local_store.store_event(event)
+⋮----
+@pytest.mark.asyncio
+    async def test_get_events_for_signal(self, local_store)
+⋮----
+"""Test retrieving events for signal."""
+# Store some events
+⋮----
+events = await local_store.get_events_for_signal("sig-001", from_sequence=0)
+⋮----
+@pytest.mark.asyncio
+    async def test_update_signal_state(self, local_store)
+⋮----
+"""Test updating signal state."""
+⋮----
+state = await local_store.update_signal_state(
+⋮----
+@pytest.mark.asyncio
+    async def test_is_position_closed(self, local_store)
+⋮----
+"""Test checking if position is closed."""
+⋮----
+# Initially not closed
+is_closed = await local_store.is_position_closed("sig-001")
+⋮----
+# Update to closed
+⋮----
+@pytest.mark.asyncio
+    async def test_ack_outbox(self, local_store)
+⋮----
+"""Test ACK outbox pattern."""
+ack1 = ExecutionACK.ok("evt-001", "sig-001")
+ack2 = ExecutionACK.error(
+⋮----
+# Store ACKs
+⋮----
+# Get pending
+pending = await local_store.get_pending_acks()
+⋮----
+# ============ ExecutionStateEngine Tests ============
+⋮----
+class TestExecutionStateEngine
+⋮----
+"""Test ExecutionStateEngine."""
+⋮----
+@pytest.mark.asyncio
+    async def test_process_signal_accepted(self, state_engine, local_store)
+⋮----
+"""Test processing SIGNAL_ACCEPTED event."""
+⋮----
+state = await local_store.get_signal_state("sig-001")
+⋮----
+@pytest.mark.asyncio
+    async def test_process_order_placed(self, state_engine, local_store)
+⋮----
+"""Test processing ORDER_PLACED event."""
+# Must accept signal first
+sig_event = ExecutionEvent(
+⋮----
+# Then place order
+order_event = ExecutionEvent(
+⋮----
+@pytest.mark.asyncio
+    async def test_duplicate_event_rejected(self, state_engine, local_store)
+⋮----
+"""Test that duplicate events are rejected."""
+⋮----
+# Process first
+⋮----
+# Try to process duplicate
+⋮----
+@pytest.mark.asyncio
+    async def test_sequence_out_of_order(self, state_engine, local_store)
+⋮----
+"""Test sequence validation."""
+⋮----
+# Process first event
+⋮----
+# Try to process with wrong sequence (should be 2)
+⋮----
+@pytest.mark.asyncio
+    async def test_late_event_after_position_closed(self, state_engine, local_store)
+⋮----
+"""Test late event rejection."""
+# Create signal and close it
+signal_id = "sig-001"
+⋮----
+# Try to process event
+⋮----
+@pytest.mark.asyncio
+    async def test_full_lifecycle(self, state_engine, local_store)
+⋮----
+"""Test full event lifecycle: signal → order → position → close."""
+⋮----
+events = [
+⋮----
+state = await local_store.get_signal_state(signal_id)
+⋮----
+# ============ ExecutionRecoveryManager Tests ============
+⋮----
+class TestExecutionRecoveryManager
+⋮----
+"""Test ExecutionRecoveryManager."""
+⋮----
+@pytest.mark.asyncio
+    async def test_recovery_bootstrap(self, recovery_manager, local_store)
+⋮----
+"""Test recovery bootstrap phase."""
+# Create some signals in the store
+⋮----
+status = await recovery_manager.recover(
+⋮----
+@pytest.mark.asyncio
+    async def test_recovery_replay(self, recovery_manager, local_store, state_engine)
+⋮----
+"""Test recovery replay phase."""
+⋮----
+# Run recovery
+status = await recovery_manager.recover(signal_ids=[signal_id])
+⋮----
+@pytest.mark.asyncio
+    async def test_recovery_pull_history_persists_events(self, recovery_manager, local_store)
+⋮----
+"""Test that pull-history phase persists fetched events into local store."""
+signal_id = "sig-hist-001"
+⋮----
+all_events = [
+⋮----
+async def fetch_history_func(sig_id: str, from_sequence: int = 0)
+⋮----
+stored_events = await local_store.get_events_for_signal(signal_id, from_sequence=0, limit=100)
+⋮----
+@pytest.mark.asyncio
+    async def test_recovery_replay_uses_pagination(self, recovery_manager, local_store)
+⋮----
+"""Test replay can process more events than one replay page."""
+signal_id = "sig-page-001"
+</file>
+
+<file path=".env.example">
+# Required system auth
+SYSTEM_WS_TOKEN=ws_b8f94450257d4e0aa3bafd2361a06b9a
+
+# Bot context
+BOT_ID=bot_355fc2aa10f04cd5958154a16b91daea
+
+# Connectivity
+SYSTEM_WS_URL=ws://171.244.195.150:8081/ws/executor
+
+# Exchange execution settings
+EXCHANGE_ID=binance
+EXCHANGE_API_KEY=
+EXCHANGE_API_SECRET=
+EXCHANGE_API_PASSPHRASE=
+EXCHANGE_SANDBOX=true
+EXCHANGE_DEFAULT_TYPE=
+DEFAULT_ORDER_AMOUNT=0.001
+DEFAULT_ORDER_TYPE=market
+EXECUTION_MODE=dry-run
+
+# Runtime tuning
+HEARTBEAT_INTERVAL_SECONDS=15
+HEARTBEAT_TIMEOUT_SECONDS=10
+HEARTBEAT_STALE_SECONDS=45
+RECONNECT_INITIAL_DELAY_SECONDS=1
+RECONNECT_MAX_DELAY_SECONDS=30
+PROTOCOL_VERSION=1.0
+HANDSHAKE_ACK_REQUIRED=true
+HANDSHAKE_ACK_TIMEOUT_SECONDS=5
+LOG_LEVEL=INFO
+</file>
+
+<file path="README.md">
+# Marcus Local Executor Client
+
+This repository contains only the trader-side local executor runtime.
+
+## Responsibilities
+- Maintain a resilient WebSocket connection to the dispatcher.
+- Perform subscribe handshake and ack validation.
+- Auto-reconnect with exponential backoff.
+- Monitor protocol heartbeat with ping/pong fallback.
+- Execute incoming signals via the configured exchange account.
+
+## Runtime Contract
+- Envelope types:
+  - signal
+  - heartbeat
+  - ack
+  - system
+- Unsupported or malformed frames are ignored and counted.
+
+## Signal Payload Contract
+
+The executor processes signal payloads with the following schema:
+
+### Required Fields
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `signal_id` | string | Unique signal identifier | `"sig-20260407-001"` |
+| `action` | string | Trading action | `"OPEN_LONG"` |
+| `symbol` | string | Trading pair (base or base/quote format) | `"BTCUSDT"` or `"BTC/USDT"` |
+
+### Optional Fields
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `amount` / `quantity` / `size` | float | Order amount (coins to trade) | `0.5` |
+| `order_type` | string | Order type: `"market"` or `"limit"` | `"market"` |
+| `price` / `limit_price` / `limitPrice` | float | Limit order price (required if `order_type="limit"`) | `65000.50` |
+| `time_in_force` | string | Time in force: `"GTC"`, `"IOC"`, `"FOK"`, etc. | `"GTC"` |
+| `asset_pair` / `assetPair` | string | Alternative symbol field | `"ETHUSDT"` |
+| `metadata` | object | Additional context | `{"strategy": "sma"}` |
+
+### Valid Actions
+
+- `OPEN_LONG` - Open long position (buy)
+- `CLOSE_LONG` - Close long position (sell, reduce_only=true)
+- `OPEN_SHORT` - Open short position (sell)
+- `CLOSE_SHORT` - Close short position (buy, reduce_only=true)
+- `BUY` - Alias for OPEN_LONG
+- `SELL` - Alias for CLOSE_LONG
+- `SELL_SHORT` - Alias for OPEN_SHORT
+- `BUY_TO_COVER` - Alias for CLOSE_SHORT
+
+### Symbol Normalization
+
+The executor normalizes symbols to CCXT format (`BASE/QUOTE`):
+
+```
+BTCUSDT     → BTC/USDT
+ethusdt     → ETH/USDT
+BTC/USDT    → BTC/USDT (unchanged)
+eth/usdt    → ETH/USDT
+```
+
+Supported quote currencies: USDT, USDC, BUSD
+
+### Examples
+
+**Minimal signal (market order):**
+```json
+{
+  "signal_id": "sig-001",
+  "action": "OPEN_LONG",
+  "symbol": "BTCUSDT"
+}
+```
+
+**Market order with amount:**
+```json
+{
+  "signal_id": "sig-002",
+  "action": "OPEN_LONG",
+  "symbol": "BTCUSDT",
+  "amount": 0.5
+}
+```
+
+**Limit order:**
+```json
+{
+  "signal_id": "sig-003",
+  "action": "OPEN_LONG",
+  "symbol": "BTCUSDT",
+  "order_type": "limit",
+  "price": 65000.50,
+  "amount": 0.5,
+  "time_in_force": "GTC"
+}
+```
+
+**Close position:**
+```json
+{
+  "signal_id": "sig-004",
+  "action": "CLOSE_LONG",
+  "symbol": "BTCUSDT",
+  "amount": 0.5
+}
+```
+
+### Validation Rules
+
+1. **Required fields must be present** and non-empty
+2. **Action must be one of the valid actions** (case-insensitive, normalized to uppercase)
+3. **Symbol must resolve to a valid trading pair** (min 2 chars)
+4. **Amount (if provided) must be > 0**
+5. **Limit orders require price field** with numeric value
+6. **Price (if provided) must be numeric and > 0**
+7. **Order type must be "market" or "limit"** (case-insensitive)
+
+### Error Responses
+
+When validation fails, ExecutionResult contains:
+- `mode`: `"error"`
+- `errors`: List of validation error messages
+- `details`: Original signal and attempted order
+
+Example error response:
+```python
+ExecutionResult(
+    mode="error",
+    order_id=None,
+    errors=["Invalid action: INVALID_ACTION. Must be one of ..."],
+    details={"signal": {...}}
+)
+```
+
+## Requirements
+- Python 3.10+
+
+## Setup
+1. Create `.env` from `.env.example` and fill values.
+2. Install:
+
+```bash
+pip install -e .
+```
+
+## Run
+```bash
+python local_executor.py
+```
+
+or
+
+```bash
+local-executor
+```
+
+## Test
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Execution Mode
+Set `EXECUTION_MODE` to `dry-run` for safe logging, or `live` to place orders via CCXT.
+
+## Contract Fixtures
+- WebSocket contract fixtures live in `tests/fixtures/contracts`.
+- Compatibility checks live in `tests/test_contract_compatibility.py`.
+- Signal validation tests live in `tests/test_engine.py` (SignalSchemaValidationTest and CcxtSignalExecutorBuildOrderTest)
+</file>
+
+<file path="src/local_executor/config.py">
+@dataclass(slots=True)
+class ExecutorConfig
+⋮----
+ws_url: str
+ws_token: str
+bot_id: str
+exchange_id: str
+exchange_api_key: str
+exchange_api_secret: str
+exchange_api_passphrase: str | None = None
+exchange_sandbox: bool = True
+exchange_default_type: str | None = None
+default_order_amount: float = 0.0
+default_order_type: str = "market"
+execution_mode: str = "dry-run"
+heartbeat_interval_seconds: float = 15.0
+heartbeat_timeout_seconds: float = 10.0
+reconnect_initial_delay_seconds: float = 1.0
+reconnect_max_delay_seconds: float = 30.0
+protocol_version: str = "1.0"
+handshake_ack_required: bool = True
+handshake_ack_timeout_seconds: float = 5.0
+heartbeat_stale_seconds: float = 45.0
+dry_run_initial_balance: float = 10000.0
+balance_sync_interval_seconds: float = 60.0
+log_level: str = "INFO"
+⋮----
+@classmethod
+    def from_env(cls) -> "ExecutorConfig"
+⋮----
+ws_url = _required("SYSTEM_WS_URL")
+ws_token = _required("SYSTEM_WS_TOKEN")
+bot_id = _required("BOT_ID")
+execution_mode = os.getenv("EXECUTION_MODE", "dry-run").strip().lower() or "dry-run"
+⋮----
+exchange_id = _optional("EXCHANGE_ID") or "binance"
+exchange_api_key = _optional("EXCHANGE_API_KEY") or ""
+exchange_api_secret = _optional("EXCHANGE_API_SECRET") or ""
+exchange_api_passphrase = _optional("EXCHANGE_API_PASSPHRASE")
+exchange_default_type = _optional("EXCHANGE_DEFAULT_TYPE")
+default_order_amount = _float("DEFAULT_ORDER_AMOUNT", 0.0)
+⋮----
+exchange_id = _required("EXCHANGE_ID")
+exchange_api_key = _required("EXCHANGE_API_KEY")
+exchange_api_secret = _required("EXCHANGE_API_SECRET")
+⋮----
+def _required(key: str) -> str
+⋮----
+value = os.getenv(key)
+⋮----
+def _float(key: str, default: float) -> float
+⋮----
+parsed = float(value)
+⋮----
+def _bool(key: str, default: bool) -> bool
+⋮----
+normalized = value.strip().lower()
+⋮----
+def _optional(key: str) -> str | None
+⋮----
+trimmed = value.strip()
+</file>
+
+<file path="src/local_executor/local_store.py">
+"""
+Local Execution State Store (EVT-12)
+
+Persistent local store for executor state using SQLite.
+
+Schema:
+- signals: track per-signal state (ACCEPTED, REJECTED, OPEN, CLOSED)
+- orders: track order state (PLACED, FILLED, FAILED, CANCELED)
+- positions: track position state (OPENED, UPDATING, CLOSED)
+- execution_events: append-only log of all received events
+- execution_acks: outbox pattern - ACKs pending delivery to backend
+- last_sync: track recovery state per signal
+
+Features:
+- Per-signal sequence validation
+- Idempotent event storage (event_id uniqueness)
+- Late event rejection (no events after position closed)
+- Outbox pattern for ACK delivery reliability
+- State machine enforcement
+"""
+⋮----
+@dataclass(slots=True)
+class SignalState
+⋮----
+"""Per-signal execution state."""
+signal_id: str
+signal_state: str  # ACCEPTED, REJECTED, OPEN, CLOSED
+order_state: str  # NONE, PLACED, FILLED, FAILED, CANCELED
+position_state: str  # NONE, OPENED, UPDATING, CLOSED
+last_sequence: int
+last_event_time: datetime | None
+closed_at: datetime | None
+created_at: datetime
+updated_at: datetime
+⋮----
+class LocalExecutionStore
+⋮----
+"""
+    SQLite-backed local execution state store.
+    
+    Thread-safe async wrapper around SQLite with:
+    - Per-signal state tracking
+    - Event deduplication
+    - Outbox pattern for ACK delivery
+    - Sequence validation and late event rejection
+    """
+⋮----
+async def initialize(self) -> None
+⋮----
+"""Create schema and initialize database."""
+⋮----
+async def close(self) -> None
+⋮----
+"""Close database connection."""
+⋮----
+def _create_schema(self) -> None
+⋮----
+"""Create SQLite schema."""
+cursor = self._conn.cursor()
+⋮----
+# Signals table: track per-signal state machine
+⋮----
+# Events table: append-only log
+⋮----
+# ACK outbox: pending ACK delivery
+⋮----
+# Recovery tracking
+⋮----
+# ============ Signal State Management ============
+⋮----
+async def get_or_create_signal(self, signal_id: str) -> SignalState
+⋮----
+"""Get signal state, creating if doesn't exist."""
+⋮----
+# Try to fetch existing
+⋮----
+row = cursor.fetchone()
+⋮----
+# Create new signal with ACCEPTED state
+now = datetime.utcnow().isoformat()
+⋮----
+async def get_signal_state(self, signal_id: str) -> SignalState | None
+⋮----
+"""Get current signal state."""
+⋮----
+async def is_position_closed(self, signal_id: str) -> bool
+⋮----
+"""Check if position is closed for signal."""
+state = await self.get_signal_state(signal_id)
+⋮----
+async def get_last_sequence(self, signal_id: str) -> int
+⋮----
+"""Get last processed sequence for signal."""
+⋮----
+async def get_active_signals(self) -> list[str]
+⋮----
+"""Discover signal_ids currently not closed to power automatic recovery bootstrapping."""
+⋮----
+"""Update signal state fields."""
+⋮----
+# Build dynamic UPDATE
+updates = ["updated_at = ?"]
+params: list[Any] = [now]
+⋮----
+sql = f"UPDATE execution_signals SET {', '.join(updates)} WHERE signal_id = ?"
+⋮----
+# ============ Event Storage ============
+⋮----
+async def store_event(self, event: ExecutionEvent) -> bool
+⋮----
+"""
+        Store execution event.
+        
+        Returns:
+            True if stored, False if already exists (duplicate)
+        """
+⋮----
+# Check if duplicate
+⋮----
+# Insert new event
+⋮----
+received_at = event.received_at.isoformat() if event.received_at else now
+⋮----
+async def event_exists(self, event_id: str) -> bool
+⋮----
+"""Return True if an event with `event_id` exists in the store."""
+⋮----
+"""Get events for signal in sequence order."""
+⋮----
+events = []
+⋮----
+# ============ ACK Outbox (Delivery Reliability) ============
+⋮----
+async def store_ack(self, ack: ExecutionACK) -> bool
+⋮----
+"""
+        Store ACK in outbox for delivery.
+        
+        Returns:
+            True if stored, False if already exists
+        """
+⋮----
+# Ensure received_at is not NULL to satisfy schema
+received_at_val = ack.received_at.isoformat() if ack.received_at else now
+⋮----
+async def get_pending_acks(self) -> list[ExecutionACK]
+⋮----
+"""Get ACKs pending delivery."""
+⋮----
+acks = []
+⋮----
+async def mark_ack_delivered(self, event_id: str) -> None
+⋮----
+"""Mark ACK as delivered."""
+⋮----
+async def increment_ack_delivery_attempts(self, event_id: str) -> None
+⋮----
+"""Increment delivery attempt counter for ACK."""
+⋮----
+# ============ Recovery Support ============
+⋮----
+async def set_recovery_state(self, signal_id: str, bootstrap_sequence: int) -> None
+⋮----
+"""Mark signal as recovered from bootstrap."""
+⋮----
+async def get_recovery_state(self, signal_id: str) -> int
+⋮----
+"""Get last bootstrap sequence for recovery."""
+⋮----
+# ============ Helper Methods ============
+⋮----
+def _row_to_signal_state(self, row: sqlite3.Row) -> SignalState
+⋮----
+"""Convert SQLite row to SignalState."""
+⋮----
+def _row_to_event(self, row: sqlite3.Row) -> ExecutionEvent
+⋮----
+"""Convert SQLite row to ExecutionEvent."""
+⋮----
+def _row_to_ack(self, row: sqlite3.Row) -> ExecutionACK
+⋮----
+"""Convert SQLite row to ExecutionACK."""
+⋮----
+error_code = None
+⋮----
+error_code = ACKErrorCode(row["error_code"])
+⋮----
+def _serialize_payload(payload: dict[str, Any]) -> str
+⋮----
+"""Serialize payload to JSON string."""
+⋮----
+def _deserialize_payload(payload_str: str) -> dict[str, Any]
+⋮----
+"""Deserialize payload from JSON string."""
+⋮----
+def _parse_datetime(value: str | None) -> datetime | None
+⋮----
+"""Parse ISO datetime string."""
+⋮----
+value = value.split("+")[0]
+⋮----
+value = value[:-1]
+</file>
+
+<file path="src/local_executor/recovery_manager.py">
+"""
+Recovery Flow (EVT-14)
+
+Bootstrap execution state after client redeploy by:
+1. Query backend recovery endpoint for last sequences
+2. Pull full event history from backend
+3. Replay events to rebuild local state
+4. Synchronize with exchange state (open orders, positions)
+5. Resume event consumption from recovered sequence
+"""
+⋮----
+class RecoveryPhase(str, Enum)
+⋮----
+"""Recovery process phases."""
+BOOTSTRAP = "bootstrap"          # Query backend for last sequence per signal
+PULL_HISTORY = "pull_history"    # Get full event history from backend
+REPLAY = "replay"                # Replay events to rebuild local state
+EXCHANGE_SYNC = "exchange_sync"  # Sync with exchange (orders, positions)
+COMPLETE = "complete"            # Recovery done
+⋮----
+@dataclass(slots=True)
+class RecoveryStatus
+⋮----
+"""Status of recovery process."""
+phase: RecoveryPhase
+signals_to_recover: list[str]
+signals_recovered: int
+events_replayed: int
+errors: list[str]
+completed_at: datetime | None = None
+⋮----
+class ExecutionRecoveryManager
+⋮----
+"""
+    Manages recovery flow after client redeploy.
+    
+    Process:
+    1. Bootstrap: Ask backend "what's the last sequence I had for each signal?"
+    2. PullHistory: Fetch all events for those signals
+    3. Replay: Re-apply those events to local store using state engine
+    4. ExchangeSync: Check exchange for any fills/updates since last event
+    5. Complete: Ready to resume normal event consumption
+    """
+⋮----
+"""
+        Execute full recovery flow.
+        
+        Args:
+            signal_ids: Signals to recover. If None, recover all known signals.
+            fetch_history_func: Async callable to fetch event history from backend.
+                               Should accept (signal_id, from_sequence) and return list[ExecutionEvent]
+            sync_exchange_func: Async callable to sync with exchange.
+                               Should accept (signal_id) and return list[ExecutionEvent] for fills/updates
+        
+        Returns:
+            RecoveryStatus with results
+        """
+⋮----
+# Phase 1: Bootstrap - determine which signals need recovery
+signals_to_recover = await self._bootstrap_signals(signal_ids or [])
+⋮----
+# Phase 2: Pull History - fetch events from backend
+⋮----
+# Phase 3: Replay - apply events to local state
+⋮----
+# Phase 4: Exchange Sync - sync with exchange
+⋮----
+# Phase 5: Mark recovered
+⋮----
+bootstrap_seq = await self._store.get_last_sequence(signal_id)
+⋮----
+async def _bootstrap_signals(self, signal_ids: list[str]) -> list[str]
+⋮----
+"""
+        Phase 1: Bootstrap
+        
+        Determine which signals need recovery:
+        - If signal_ids provided, use those
+        - Otherwise, check store for signals already in progress
+        """
+⋮----
+# Explicit signals provided
+to_recover = signal_ids
+⋮----
+# Auto-discover signals from store (those not closed)
+to_recover = await self._store.get_active_signals()
+⋮----
+"""
+        Phase 2: Pull History from backend
+        
+        Fetch all events for each signal from the recovery endpoint.
+        """
+⋮----
+# Ensure FK target exists before persisting events
+⋮----
+# Pull and persist history incrementally from backend
+from_sequence = 0
+total_fetched = 0
+total_stored = 0
+⋮----
+events = await fetch_history_func(signal_id, from_sequence=from_sequence)
+⋮----
+events = sorted(events, key=lambda e: e.sequence)
+⋮----
+max_sequence_in_page = from_sequence
+⋮----
+max_sequence_in_page = max(max_sequence_in_page, event.sequence)
+⋮----
+# Prevent infinite loops if backend ignores from_sequence.
+⋮----
+from_sequence = max_sequence_in_page + 1
+⋮----
+async def _replay_phase(self, signal_ids: list[str]) -> None
+⋮----
+"""
+        Phase 3: Replay
+        
+        Re-apply all stored events to rebuild local state.
+        """
+⋮----
+# Ensure signal row exists before resetting state fields.
+⋮----
+# Reset state to initial for replay
+⋮----
+events_for_signal = 0
+next_sequence = 0
+⋮----
+events = await self._store.get_events_for_signal(
+⋮----
+# Continue replay despite individual event errors
+⋮----
+next_sequence = events[-1].sequence + 1
+⋮----
+"""
+        Phase 4: Exchange Sync
+        
+        Check exchange for any fills/updates since last event.
+        Emit synthetic events for exchange updates.
+        """
+⋮----
+# Get current sequence from store
+last_sequence = await self._store.get_last_sequence(signal_id)
+⋮----
+# Ask exchange for any updates
+exchange_events = await sync_exchange_func(signal_id)
+⋮----
+# Exchange events should continue sequence from last
+⋮----
+exc_event_with_seq = ExecutionEvent(
+⋮----
+def get_status(self) -> RecoveryStatus
+⋮----
+"""Get current recovery status."""
+</file>
+
+<file path="tests/test_contract_compatibility.py">
+# pyright: reportMissingImports=false
+⋮----
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
+⋮----
+def _load_fixture(name: str) -> dict[str, Any]
+⋮----
+fixture_path = FIXTURE_DIR / name
+⋮----
+class _HandshakeWebSocket
+⋮----
+def __init__(self, incoming_frames: list[str]) -> None
+⋮----
+async def send(self, frame: str) -> None
+⋮----
+async def recv(self) -> str
+⋮----
+class ExecutorContractFixtureTest(unittest.IsolatedAsyncioTestCase)
+⋮----
+async def test_should_emit_signed_handshake_frame_matching_contract_fixture(self) -> None
+⋮----
+expected_handshake = _load_fixture("ws_handshake_subscribe_v1.json")
+ack_valid = _load_fixture("ws_ack_valid_v1.json")
+⋮----
+client = ResilientWebSocketClient(
+websocket = _HandshakeWebSocket(incoming_frames=[json.dumps(ack_valid)])
+⋮----
+actual_handshake = json.loads(websocket.sent_frames[0])
+⋮----
+expected_payload = {
+payload_json = json.dumps(expected_payload, separators=(",", ":"))
+payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+expected_signature = base64.b64encode(
+⋮----
+async def test_should_decode_signal_and_heartbeat_from_fixture_contract(self) -> None
+⋮----
+signal_fixture = _load_fixture("ws_signal_envelope_v1.json")
+heartbeat_fixture = _load_fixture("ws_heartbeat_v1.json")
+⋮----
+signal_result = client._decode_envelope(signal_fixture)
+heartbeat_result = client._decode_envelope(heartbeat_fixture)
+⋮----
+async def test_should_validate_ack_fixture_and_reject_invalid_ack_fixture(self) -> None
+⋮----
+ack_invalid = _load_fixture("ws_ack_invalid_v1.json")
+⋮----
+async def test_should_reject_unsupported_envelope_fixture(self) -> None
+⋮----
+unsupported = _load_fixture("ws_unsupported_v1.json")
+⋮----
+result = client._decode_envelope(unsupported)
+⋮----
+async def _noop_signal(self, payload: dict[str, Any]) -> None
+⋮----
+_ = payload
+⋮----
+async def _noop_resync(self, reason: str) -> None
+⋮----
+_ = reason
+</file>
+
+<file path="tests/test_ws_client.py">
+# pyright: reportMissingImports=false
+⋮----
+class _FakeWebSocket
+⋮----
+async def __aenter__(self) -> "_FakeWebSocket"
+⋮----
+async def __aexit__(self, exc_type, exc, tb) -> bool
+⋮----
+async def recv(self) -> Any
+⋮----
+next_value = self._messages.pop(0)
+⋮----
+next_value = next_value[1]
+⋮----
+async def send(self, message: str) -> None
+⋮----
+def ping(self) -> asyncio.Future[None]
+⋮----
+future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+⋮----
+class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase)
+⋮----
+async def test_should_resync_before_processing_first_signal(self) -> None
+⋮----
+stop_event = asyncio.Event()
+events: list[tuple[str, str]] = []
+⋮----
+async def on_signal(payload: dict[str, Any]) -> None
+⋮----
+async def on_resync(reason: str) -> None
+⋮----
+fake_ws = _FakeWebSocket(
+⋮----
+client = ResilientWebSocketClient(
+⋮----
+hello = json.loads(fake_ws.sent_frames[0])
+expected_payload = {
+payload_json = json.dumps(expected_payload, separators=(",", ":"))
+payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+expected_signature = base64.b64encode(
+⋮----
+async def test_should_use_exponential_backoff_on_reconnect(self) -> None
+⋮----
+sleep_durations: list[float] = []
+⋮----
+async def fake_sleep(duration: float) -> None
+⋮----
+_ = payload
+⋮----
+_ = reason
+⋮----
+def failing_connect(*args, **kwargs)
+⋮----
+async def test_should_reconnect_when_handshake_ack_is_invalid(self) -> None
+⋮----
+signals: list[str] = []
+sleeps: list[float] = []
+⋮----
+first_socket = _FakeWebSocket(
+second_socket = _FakeWebSocket(
+sockets = [first_socket, second_socket]
+⋮----
+def connect_func(*args, **kwargs)
+⋮----
+_ = args
+_ = kwargs
+⋮----
+counters = client.get_counters()
+⋮----
+async def test_should_reconnect_when_heartbeat_becomes_stale(self) -> None
+⋮----
+resync_reasons: list[str] = []
+⋮----
+_ = duration
+⋮----
+async def test_should_filter_unsupported_message_types(self) -> None
+⋮----
+socket = _FakeWebSocket(
+</file>
+
+<file path="src/local_executor/engine.py">
+SignalHandler = Callable[[dict[str, Any]], Awaitable[None]]
+⋮----
+class LocalExecutorEngine
+⋮----
+"""
+    Core execution loop for the local executor.
+
+    Responsibilities:
+    - Maintain a resilient WebSocket connection to the Marcus backend.
+    - Receive signal payloads and execute them via CcxtSignalExecutor.
+    - Deduplicate signals using the SQLite-backed LocalExecutionStore.
+    - Periodically emit account balance snapshots for the dashboard.
+    """
+⋮----
+async def run(self, stop_event: asyncio.Event | None = None) -> None
+⋮----
+stop_event = stop_event or asyncio.Event()
+⋮----
+# Initialise the local store if provided but not yet open
+⋮----
+tasks = [
+⋮----
+exc = t.exception()
+⋮----
+# ── Signal handling ────────────────────────────────────────────────────
+⋮----
+async def _handle_signal(self, payload: dict[str, Any]) -> None
+⋮----
+async def _default_signal_handler(self, payload: dict[str, Any]) -> None
+⋮----
+"""
+        Default signal handler: dedup check → execute → update local state.
+
+        Dedup logic uses the execution_signals table in LocalExecutionStore.
+        A signal is considered already-processed if its local state is OPEN or CLOSED.
+        Signals in ACCEPTED state (created but not yet executed) are re-attempted
+        — this can happen if the process crashed after WS delivery but before execution.
+        """
+signal_id = payload.get("signal_id")
+⋮----
+# --- Dedup check (SQLite, idempotent on reconnect) ---
+⋮----
+existing = await self._local_store.get_signal_state(signal_id)
+⋮----
+# --- Execute ---
+result = await self._executor.execute_signal(payload)
+⋮----
+action = payload.get("action", "unknown")
+symbol = payload.get("symbol", "unknown")
+⋮----
+# --- Update local state ---
+⋮----
+# Mark as OPEN — downstream execution events will close it
+⋮----
+# Record the signal but mark as REJECTED so dedup still protects
+⋮----
+async def _on_resync(self, reason: str) -> None
+⋮----
+# ── Balance sync loop ──────────────────────────────────────────────────
+⋮----
+async def _balance_sync_loop(self, stop_event: asyncio.Event) -> None
+⋮----
+"""Periodically emits account equity to backend for dashboard views."""
+interval = max(5.0, self._config.balance_sync_interval_seconds)
+⋮----
+# Wait briefly to let the handshake settle on startup
+⋮----
+bal = await self._executor.fetch_balance()
+frame = {
+success = await self._ws_client.send_frame(frame)
+⋮----
+break  # stop_event was set
+⋮----
+continue  # normal cycle
+</file>
+
+<file path="src/local_executor/execution.py">
+# ---------------------------------------------------------------------------
+# Result type
+⋮----
+@dataclass(slots=True)
+class ExecutionResult
+⋮----
+mode: str                         # "dry-run" | "live" | "error"
+order_id: str | None
+details: dict[str, Any]
+errors: list[str] | None = None
+⋮----
+# Canonical action → CCXT mapping
+#
+# Only 4 semantic actions are supported. Aliases (BUY, SELL, SELL_SHORT, …)
+# are intentionally omitted — they are ambiguous and not part of the backend
+# SignalAction enum.
+⋮----
+# Layout: action_name → (ccxt_side, default_reduce_only)
+⋮----
+_ACTION_MAP: dict[str, tuple[str, bool]] = {
+⋮----
+"OPEN_LONG":   ("buy",  False),  # Open a long position
+"CLOSE_LONG":  ("sell", True),   # Close an existing long (reduce-only sell)
+"OPEN_SHORT":  ("sell", False),  # Open a short position
+"CLOSE_SHORT": ("buy",  True),   # Close an existing short (reduce-only buy)
+⋮----
+# UPDATE_TP_SL is a special action that modifies an open order — not mapped to
+# create_order. It is valid in VALID_ACTIONS so schema validation passes, but
+# _build_order() will raise if called with it.
+VALID_ACTIONS: frozenset[str] = frozenset(_ACTION_MAP) | {"UPDATE_TP_SL"}
+⋮----
+VALID_MARKET_TYPES: frozenset[str] = frozenset({"SPOT", "FUTURE", "MARGIN"})
+VALID_ORDER_TYPES: frozenset[str] = frozenset({"LIMIT", "MARKET"})
+VALID_MARGIN_MODES: frozenset[str] = frozenset({"CROSS", "ISOLATED"})
+⋮----
+_ACTION_ALIASES: dict[str, str] = {
+⋮----
+# Signal schema validation
+⋮----
+class SignalSchema
+⋮----
+"""Validates the signal payload delivered over WebSocket against the backend contract."""
+⋮----
+REQUIRED_FIELDS: frozenset[str] = frozenset({"signal_id", "action"})
+⋮----
+@staticmethod
+    def validate(payload: dict[str, Any]) -> tuple[bool, list[str]]
+⋮----
+"""
+        Validate signal payload.
+
+        Returns:
+            (is_valid, error_list) — error_list is empty when is_valid is True.
+        """
+errors: list[str] = []
+⋮----
+# Required fields presence check
+⋮----
+# Resolve symbol from aliases
+symbol = None
+symbol_key_present = False
+⋮----
+symbol_key_present = True
+⋮----
+symbol = payload[key]
+⋮----
+# --- action ---
+action = str(payload["action"]).strip().upper()
+action = _ACTION_ALIASES.get(action, action)
+⋮----
+# --- market_type ---
+market_type = str(payload.get("market_type") or "SPOT").strip().upper()
+⋮----
+# --- order_type ---
+# Default to MARKET to match minimal valid signals / config default, or default to LIMIT if specified.
+order_type = str(payload.get("order_type") or "MARKET").strip().upper()
+⋮----
+# --- entry: required for LIMIT orders ---
+⋮----
+entry = None
+⋮----
+entry = payload[key]
+⋮----
+# --- amount (optional — executor may use env default) ---
+amount = None
+⋮----
+amount = payload[key]
+⋮----
+amt = float(amount)
+⋮----
+# --- leverage: 1–125 (futures only, optional) ---
+leverage = payload.get("leverage")
+⋮----
+lev = int(leverage)
+⋮----
+# --- margin_mode (optional) ---
+margin_mode = payload.get("margin_mode")
+⋮----
+# CCXT signal executor
+⋮----
+class CcxtSignalExecutor
+⋮----
+"""
+    Translates validated signal payloads into CCXT exchange orders.
+
+    Futures lifecycle (when market_type == FUTURE):
+      1. set_leverage(leverage, symbol)  — aborts on failure
+      2. set_margin_mode(margin_mode, symbol) — aborts on failure
+      3. create_order(...)
+    """
+⋮----
+def __init__(self, config: ExecutorConfig, logger: logging.Logger | None = None) -> None
+⋮----
+@property
+    def _exchange(self) -> Any
+⋮----
+"""Deprecated: Use _get_exchange(market_type) instead. Kept for backward compatibility."""
+default_type = (self._config.exchange_default_type or "FUTURE").upper()
+⋮----
+@_exchange.setter
+    def _exchange(self, value: Any) -> None
+⋮----
+# ── Public API ─────────────────────────────────────────────────────────
+⋮----
+async def fetch_balance(self, market_type: str | None = None) -> dict[str, float]
+⋮----
+"""Retrieve current account balance (thread-safe async wrapper)."""
+⋮----
+async def execute_signal(self, payload: dict[str, Any]) -> ExecutionResult
+⋮----
+"""Validate and execute a signal payload (thread-safe async wrapper)."""
+⋮----
+# ── Execution ──────────────────────────────────────────────────────────
+⋮----
+def _execute_signal_sync(self, payload: dict[str, Any]) -> ExecutionResult
+⋮----
+# 1. Schema validation
+⋮----
+# 2. Deadline / expiry check (clean boundary)
+cancel_after = payload.get("cancel_after_timestamp")
+⋮----
+# 3. Special actions — not order-creating
+action = str(payload.get("action", "")).strip().upper()
+⋮----
+# 4. Build CCXT order dict
+⋮----
+order = self._build_order(payload)
+⋮----
+# 5. Dry-run short-circuit
+⋮----
+# 6. Live execution — Futures lifecycle + create_order
+⋮----
+market_type = str(payload.get("market_type") or "SPOT").upper()
+exchange = self._get_exchange(market_type)
+⋮----
+result = self._execute_futures(exchange, order, payload)
+⋮----
+return result  # lifecycle call failed → abort
+⋮----
+created = exchange.create_order(
+⋮----
+"""
+        Run Futures lifecycle calls before create_order.
+
+        Returns an error ExecutionResult if any call fails (caller should abort),
+        or None to continue.
+        """
+symbol = order["symbol"]
+leverage = int(payload.get("leverage") or 1)
+margin_mode = str(payload.get("margin_mode") or "CROSS").lower()
+⋮----
+# Step 1: set_leverage — abort on failure
+⋮----
+# Step 2: set_margin_mode — abort on failure
+⋮----
+return None  # success — proceed to create_order
+⋮----
+# ── Order building ─────────────────────────────────────────────────────
+⋮----
+def _build_order(self, payload: dict[str, Any]) -> dict[str, Any]
+⋮----
+raw_symbol = payload.get("symbol") or payload.get("asset_pair") or payload.get("assetPair")
+symbol = self._normalize_symbol(raw_symbol)
+⋮----
+order_type = str(
+⋮----
+# entry is the canonical price field (per Unified Spec)
+# fallback to price/limit_price/limitPrice
+entry = payload.get("entry") or payload.get("price") or payload.get("limit_price") or payload.get("limitPrice")
+⋮----
+price = float(entry)
+⋮----
+price = None
+⋮----
+# amount: signal value takes priority, env default is fallback
+# check aliases quantity / size
+amount = payload.get("amount") or payload.get("quantity") or payload.get("size")
+⋮----
+amount = self._config.default_order_amount
+amount = float(amount)
+⋮----
+# signal-level reduce_only overrides the action default
+reduce_only_raw = payload.get("reduce_only")
+⋮----
+reduce_only_raw = reduce_only_raw.lower() == "true"
+⋮----
+params: dict[str, Any] = {}
+⋮----
+# Idempotency link: clientOrderId → signal_id in exchange records
+signal_id = payload.get("signal_id")
+⋮----
+# time_in_force alias support
+time_in_force = payload.get("time_in_force") or payload.get("timeInForce")
+⋮----
+# ── Balance ────────────────────────────────────────────────────────────
+⋮----
+def _fetch_balance_sync(self, market_type: str | None = None) -> dict[str, float]
+⋮----
+val = self._config.dry_run_initial_balance
+⋮----
+balance = exchange.fetch_balance()
+⋮----
+details = balance[curr]
+⋮----
+# ── Exchange lifecycle ─────────────────────────────────────────────────
+⋮----
+def _get_exchange(self, market_type: str | None = None) -> Any
+⋮----
+"""Return cached exchange instance for the target market type, or build a new one."""
+target_market = (market_type or self._config.exchange_default_type or "FUTURE").upper()
+⋮----
+# For backward compatibility and unit tests that inject a single mock/override exchange,
+# we check if there's exactly one exchange already registered in _exchanges.
+⋮----
+def _build_exchange(self, market_type: str | None = None) -> Any
+⋮----
+exchange_id = self._config.exchange_id
+⋮----
+options: dict[str, Any] = {}
+⋮----
+# Configure defaultType based on market_type
+⋮----
+exchange = getattr(ccxt, exchange_id)(
+⋮----
+# ── Symbol normalisation ───────────────────────────────────────────────
+⋮----
+@staticmethod
+    def _normalize_symbol(value: Any) -> str | None
+⋮----
+raw = str(value).strip().upper()
+⋮----
+# Already in CCXT unified format (e.g. BTC/USDT or ETH/USDT:USDT)
+⋮----
+# Attempt to reconstruct BASE/QUOTE from concatenated form (e.g. BTCUSDT)
+⋮----
+base = raw[: -len(quote)]
+⋮----
+# Pure action → CCXT mapping function (module-level for testability)
+⋮----
+def _map_action(action: str, signal_reduce_only: bool | None = None) -> tuple[str, bool]
+⋮----
+"""
+    Map a canonical SignalAction to a (ccxt_side, reduce_only) tuple.
+
+    Args:
+        action:             One of the 4 canonical action names in _ACTION_MAP.
+        signal_reduce_only: Explicit override from the signal payload.
+                            When not None, overrides the action-derived default.
+
+    Returns:
+        (ccxt_side, reduce_only) where ccxt_side is "buy" or "sell".
+
+    Raises:
+        ValueError: If action is not in _ACTION_MAP.
+    """
+entry = _ACTION_MAP.get(action)
+⋮----
+final_reduce = signal_reduce_only if signal_reduce_only is not None else default_reduce
+</file>
+
+<file path="src/local_executor/ws_client.py">
+class ResilientWebSocketClient
+⋮----
+"""WebSocket client with reconnect, explicit envelope handling, and heartbeat checks."""
+⋮----
+# State for outbound frame pushes
+⋮----
+async def run(self, stop_event: asyncio.Event | None = None) -> None
+⋮----
+stop_event = stop_event or asyncio.Event()
+reconnect_delay = self._reconnect_initial_delay_seconds
+is_first_connect = True
+⋮----
+self._websocket = websocket  # Expose active websocket for outbound pushes
+⋮----
+reason = "startup" if is_first_connect else "reconnect"
+⋮----
+is_first_connect = False
+⋮----
+except Exception as exc:  # noqa: BLE001 - runtime needs broad reconnect handling
+# Include exception details to help triage server-side closes
+⋮----
+self._websocket = None  # Clear websocket reference on disconnect
+⋮----
+reconnect_delay = min(reconnect_delay * 2, self._reconnect_max_delay_seconds)
+⋮----
+async def _consume_loop(self, websocket: Any, stop_event: asyncio.Event) -> None
+⋮----
+raw_message = await asyncio.wait_for(
+handled = await self._handle_frame(raw_message)
+⋮----
+# Log close code and reason for diagnostics then re-raise
+⋮----
+code = getattr(cc, "code", None)
+reason = getattr(cc, "reason", None)
+⋮----
+async def _perform_handshake(self, websocket: Any) -> None
+⋮----
+hello_payload = self._build_handshake_frame()
+⋮----
+loop = asyncio.get_running_loop()
+deadline = loop.time() + self._handshake_ack_timeout_seconds
+⋮----
+remaining = deadline - loop.time()
+⋮----
+raw_message = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+message = self._decode_message(raw_message)
+⋮----
+envelope = self._decode_envelope(message)
+⋮----
+code = payload.get("code", "unknown")
+msg = payload.get("message", "unknown error")
+⋮----
+async def _handle_frame(self, raw_message: Any) -> bool
+⋮----
+# Clean Boundary Protocol: Acknowledge immediately to server
+signal_id = payload.get("signal_id")
+⋮----
+async def send_frame(self, frame: dict[str, Any]) -> bool
+⋮----
+"""Send a JSON frame asynchronously to the active websocket securely."""
+⋮----
+encoded = json.dumps(frame, separators=(",", ":"))
+⋮----
+# Double-check after lock acquisition
+⋮----
+async def _do_heartbeat(self, websocket: Any) -> None
+⋮----
+pong_waiter = websocket.ping()
+⋮----
+def _mark_heartbeat(self, source: str) -> None
+⋮----
+def _is_heartbeat_stale(self) -> bool
+⋮----
+elapsed = asyncio.get_running_loop().time() - self._last_heartbeat_monotonic
+⋮----
+def _decode_envelope(self, message: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
+⋮----
+frame_type = message.get("type")
+⋮----
+normalized = frame_type.strip().lower()
+⋮----
+payload = message.get("payload")
+⋮----
+def _is_valid_handshake_ack(self, payload: dict[str, Any]) -> bool
+⋮----
+status = str(payload.get("status", "")).strip().lower()
+ack_type = str(payload.get("ack_type") or payload.get("for") or payload.get("event") or "").strip().lower()
+⋮----
+def _build_handshake_frame(self) -> dict[str, Any]
+⋮----
+timestamp = self._timestamp_func()
+payload = {
+signature = self._sign_handshake(payload)
+⋮----
+def _sign_handshake(self, payload: dict[str, Any]) -> str
+⋮----
+payload_json = json.dumps(payload, separators=(",",":"))
+payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+message = f"{self._bot_id}|{payload['timestamp']}|{payload_b64}".encode("utf-8")
+digest = hmac.new(self._ws_token.encode("utf-8"), message, hashlib.sha256).digest()
+⋮----
+@staticmethod
+    async def _noop_async(payload: dict[str, Any]) -> None
+⋮----
+_ = payload
+⋮----
+@staticmethod
+    def _now_utc_iso() -> str
+⋮----
+def get_counters(self) -> dict[str, int]
+⋮----
+@staticmethod
+    def _looks_like_legacy_signal(message: dict[str, Any]) -> bool
+⋮----
+def _decode_message(self, raw_message: Any) -> dict[str, Any] | None
+⋮----
+text = raw_message.decode("utf-8", errors="replace")
+⋮----
+text = str(raw_message)
+⋮----
+decoded = json.loads(text)
+</file>
+
+</files>

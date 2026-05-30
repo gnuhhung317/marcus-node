@@ -3,6 +3,9 @@ from __future__ import annotations
 # pyright: reportMissingImports=false
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import sys
 import unittest
@@ -70,7 +73,7 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
 
         fake_ws = _FakeWebSocket(
             messages=[
-                '{"type":"ack","payload":{"status":"ok","ack_type":"subscribe"}}',
+                '{"type":"handshake-ack","payload":{"status":"ok","ack_type":"handshake"}}',
                 '{"type":"signal","payload":{"signal_id":"sig-1","action":"OPEN_LONG"}}',
             ]
         )
@@ -86,6 +89,8 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
             on_resync=on_resync,
             bot_id="bot-01",
             protocol_version="1.0",
+            nonce_func=lambda: "nonce-123",
+            timestamp_func=lambda: "2026-05-09T10:00:00Z",
             connect_func=lambda *args, **kwargs: fake_ws,
         )
 
@@ -97,10 +102,29 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(fake_ws.sent_frames), 1)
         hello = json.loads(fake_ws.sent_frames[0])
-        self.assertEqual(hello["type"], "subscribe")
-        self.assertEqual(hello["payload"]["bot_id"], "bot-01")
-        self.assertEqual(hello["payload"]["protocol_version"], "1.0")
-        self.assertEqual(hello["payload"]["mode"], "consume_only")
+        expected_payload = {
+            "nonce": "nonce-123",
+            "protocol_version": "1.0",
+            "stream": "signal_execution",
+            "mode": "consume_only",
+            "bot_id": "bot-01",
+            "timestamp": "2026-05-09T10:00:00Z",
+        }
+        payload_json = json.dumps(expected_payload, separators=(",", ":"))
+        payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+        expected_signature = base64.b64encode(
+            hmac.new(
+                b"secret-token",
+                f"bot-01|2026-05-09T10:00:00Z|{payload_b64}".encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode("ascii")
+
+        self.assertEqual(hello["type"], "handshake")
+        self.assertEqual(hello["botId"], "bot-01")
+        self.assertEqual(hello["timestamp"], "2026-05-09T10:00:00Z")
+        self.assertEqual(hello["payload"], expected_payload)
+        self.assertEqual(hello["signature"], expected_signature)
 
     async def test_should_use_exponential_backoff_on_reconnect(self) -> None:
         stop_event = asyncio.Event()

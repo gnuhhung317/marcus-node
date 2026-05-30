@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Any
 
 import websockets
@@ -23,6 +28,9 @@ class ResilientWebSocketClient:
         reconnect_max_delay_seconds: float,
         on_signal: Callable[[dict[str, Any]], Awaitable[None]],
         on_resync: Callable[[str], Awaitable[None]],
+        on_audit_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_control: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_replay_response: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         bot_id: str = "unknown-bot",
         protocol_version: str = "1.0",
         handshake_ack_required: bool = True,
@@ -30,6 +38,8 @@ class ResilientWebSocketClient:
         heartbeat_stale_seconds: float = 45.0,
         connect_func: Callable[..., Any] | None = None,
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        nonce_func: Callable[[], str] | None = None,
+        timestamp_func: Callable[[], str] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._ws_url = ws_url
@@ -40,6 +50,9 @@ class ResilientWebSocketClient:
         self._reconnect_max_delay_seconds = reconnect_max_delay_seconds
         self._on_signal = on_signal
         self._on_resync = on_resync
+        self._on_audit_push = on_audit_push or self._noop_async
+        self._on_control = on_control or self._noop_async
+        self._on_replay_response = on_replay_response or self._noop_async
         self._bot_id = bot_id
         self._protocol_version = protocol_version
         self._handshake_ack_required = handshake_ack_required
@@ -47,11 +60,17 @@ class ResilientWebSocketClient:
         self._heartbeat_stale_seconds = heartbeat_stale_seconds
         self._connect_func = connect_func or websockets.connect
         self._sleep_func = sleep_func
+        self._nonce_func = nonce_func or (lambda: uuid4().hex)
+        self._timestamp_func = timestamp_func or self._now_utc_iso
         self._logger = logger or logging.getLogger(__name__)
         self._last_heartbeat_monotonic = 0.0
         self._reconnect_count = 0
         self._heartbeat_timeout_count = 0
         self._invalid_message_count = 0
+        
+        # State for outbound frame pushes
+        self._websocket: Any | None = None
+        self._send_lock = asyncio.Lock()
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
         stop_event = stop_event or asyncio.Event()
@@ -66,6 +85,7 @@ class ResilientWebSocketClient:
                     ping_interval=None,
                     ping_timeout=None,
                 ) as websocket:
+                    self._websocket = websocket  # Expose active websocket for outbound pushes
                     await self._perform_handshake(websocket)
                     self._mark_heartbeat("connect")
                     reason = "startup" if is_first_connect else "reconnect"
@@ -81,13 +101,18 @@ class ResilientWebSocketClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - runtime needs broad reconnect handling
+                # Include exception details to help triage server-side closes
                 self._logger.warning(
-                    "WebSocket connection dropped error=%s reconnect_count=%d heartbeat_timeout_count=%d invalid_message_count=%d",
+                    "WebSocket connection dropped error=%s reconnect_count=%d heartbeat_timeout_count=%d invalid_message_count=%d exc=%s",
                     exc.__class__.__name__,
                     self._reconnect_count,
                     self._heartbeat_timeout_count,
                     self._invalid_message_count,
+                    repr(exc),
                 )
+                self._logger.debug("Full exception details:", exc_info=exc)
+            finally:
+                self._websocket = None  # Clear websocket reference on disconnect
 
             if stop_event.is_set():
                 break
@@ -111,19 +136,22 @@ class ResilientWebSocketClient:
                 await self._do_heartbeat(websocket)
                 if self._is_heartbeat_stale():
                     raise RuntimeError("Heartbeat stale after ping/pong fallback.")
-            except ConnectionClosed:
+            except ConnectionClosed as cc:
+                # Log close code and reason for diagnostics then re-raise
+                try:
+                    code = getattr(cc, "code", None)
+                    reason = getattr(cc, "reason", None)
+                    self._logger.warning(
+                        "WebSocket closed by server code=%s reason=%s",
+                        code,
+                        reason,
+                    )
+                except Exception:
+                    self._logger.warning("WebSocket closed by server (no details).")
                 raise
 
     async def _perform_handshake(self, websocket: Any) -> None:
-        hello_payload = {
-            "type": "subscribe",
-            "payload": {
-                "bot_id": self._bot_id,
-                "protocol_version": self._protocol_version,
-                "stream": "signal_execution",
-                "mode": "consume_only",
-            },
-        }
+        hello_payload = self._build_handshake_frame()
         await websocket.send(json.dumps(hello_payload, separators=(",", ":")))
 
         if not self._handshake_ack_required:
@@ -151,7 +179,11 @@ class ResilientWebSocketClient:
             if message_type == "heartbeat":
                 self._mark_heartbeat("protocol")
                 continue
-            if message_type in {"ack", "system"} and self._is_valid_handshake_ack(payload):
+            if message_type == "system":
+                code = payload.get("code", "unknown")
+                msg = payload.get("message", "unknown error")
+                raise RuntimeError(f"Handshake rejected by server. Code: {code}, Message: {msg}")
+            if message_type in {"handshake-ack", "ack"} and self._is_valid_handshake_ack(payload):
                 self._logger.info("Handshake acknowledged for bot_id=%s", self._bot_id)
                 return
 
@@ -169,6 +201,15 @@ class ResilientWebSocketClient:
 
         message_type, payload = envelope
         if message_type == "signal":
+            # Clean Boundary Protocol: Acknowledge immediately to server
+            signal_id = payload.get("signal_id")
+            if signal_id:
+                asyncio.create_task(self.send_frame({
+                    "type": "signal_ack",
+                    "payload": {"signal_id": signal_id, "bot_id": self._bot_id}
+                }))
+                self._logger.info("Scheduled immediate delivery ACK for signal_id=%s", signal_id)
+
             await self._on_signal(payload)
             return True
 
@@ -176,11 +217,41 @@ class ResilientWebSocketClient:
             self._mark_heartbeat("protocol")
             return True
 
-        if message_type in {"ack", "system"}:
+        if message_type == "audit-push":
+            await self._on_audit_push(payload)
+            return True
+
+        if message_type == "control":
+            await self._on_control(payload)
+            return True
+
+        if message_type == "replay-response":
+            await self._on_replay_response(payload)
+            return True
+
+        if message_type in {"handshake-ack", "ack", "system"}:
             self._logger.info("Ignoring non-signal frame type=%s", message_type)
             return True
 
         return False
+
+    async def send_frame(self, frame: dict[str, Any]) -> bool:
+        """Send a JSON frame asynchronously to the active websocket securely."""
+        if self._websocket is None:
+            self._logger.debug("Dropping send_frame call: WebSocket not connected.")
+            return False
+
+        try:
+            encoded = json.dumps(frame, separators=(",", ":"))
+            async with self._send_lock:
+                # Double-check after lock acquisition
+                if self._websocket is not None:
+                    await self._websocket.send(encoded)
+                    return True
+            return False
+        except Exception as e:
+            self._logger.warning("Failed to send WebSocket frame: %s", e)
+            return False
 
     async def _do_heartbeat(self, websocket: Any) -> None:
         pong_waiter = websocket.ping()
@@ -212,7 +283,7 @@ class ResilientWebSocketClient:
             return None
 
         normalized = frame_type.strip().lower()
-        if normalized not in {"signal", "heartbeat", "ack", "system"}:
+        if normalized not in {"signal", "heartbeat", "ack", "handshake-ack", "system", "audit-push", "control", "replay-response"}:
             self._invalid_message_count += 1
             self._logger.warning("Skipping unsupported frame type=%s", normalized)
             return None
@@ -233,16 +304,50 @@ class ResilientWebSocketClient:
         return normalized, message
 
     def _is_valid_handshake_ack(self, payload: dict[str, Any]) -> bool:
-        status = str(payload.get("status", "ok")).strip().lower()
+        status = str(payload.get("status", "")).strip().lower()
         ack_type = str(payload.get("ack_type") or payload.get("for") or payload.get("event") or "").strip().lower()
 
         if status not in {"ok", "success", "accepted"}:
             return False
 
-        if ack_type and ack_type not in {"subscribe", "hello", "subscribed", "session_ready"}:
+        if ack_type and ack_type not in {"subscribe", "hello", "subscribed", "session_ready", "handshake", "handshake-ack"}:
             return False
 
         return True
+
+    def _build_handshake_frame(self) -> dict[str, Any]:
+        timestamp = self._timestamp_func()
+        payload = {
+            "nonce": self._nonce_func(),
+            "protocol_version": self._protocol_version,
+            "stream": "signal_execution",
+            "mode": "consume_only",
+            "bot_id": self._bot_id,
+            "timestamp": timestamp,
+        }
+        signature = self._sign_handshake(payload)
+        return {
+            "type": "handshake",
+            "botId": self._bot_id,
+            "timestamp": timestamp,
+            "payload": payload,
+            "signature": signature,
+        }
+
+    def _sign_handshake(self, payload: dict[str, Any]) -> str:
+        payload_json = json.dumps(payload, separators=(",",":"))
+        payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+        message = f"{self._bot_id}|{payload['timestamp']}|{payload_b64}".encode("utf-8")
+        digest = hmac.new(self._ws_token.encode("utf-8"), message, hashlib.sha256).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    @staticmethod
+    async def _noop_async(payload: dict[str, Any]) -> None:
+        _ = payload
+
+    @staticmethod
+    def _now_utc_iso() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def get_counters(self) -> dict[str, int]:
         return {
