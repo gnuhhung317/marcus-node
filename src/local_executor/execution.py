@@ -220,6 +220,79 @@ class CcxtSignalExecutor:
         """Validate and execute a signal payload (thread-safe async wrapper)."""
         return await asyncio.to_thread(self._execute_signal_sync, payload)
 
+    async def sync_exchange(self, signal_id: str, local_store: Any) -> list[Any]:
+        """
+        Query active positions and open orders from the exchange using CCXT API to recover state.
+        
+        This queries the exchange for:
+        1. The specific order or open orders to resolve order status (placed, filled, canceled, failed).
+        2. Open positions to resolve position status (opened, closed).
+        
+        Returns a list of synthetic ExecutionEvents required to reconcile local state with exchange state.
+        """
+        state = await local_store.get_signal_state(signal_id)
+        if not state:
+            self._logger.warning("sync_exchange: No local state found for signal_id=%s", signal_id)
+            return []
+            
+        if state.position_state == "CLOSED":
+            self._logger.debug("sync_exchange: signal_id=%s is already CLOSED", signal_id)
+            return []
+
+        # Resolve symbol with our robust helper
+        symbol = await self._resolve_symbol(signal_id, state, local_store)
+        
+        policies = state.policies or {}
+        market_type = policies.get("market_type") or policies.get("marketType") or self._config.exchange_default_type or "FUTURE"
+        market_type = str(market_type).upper()
+
+        order_id = state.order_id
+        if not order_id:
+            events = await local_store.get_events_for_signal(signal_id, limit=50)
+            for e in events:
+                oid = e.payload.get("order_id") or e.payload.get("id")
+                if oid:
+                    order_id = oid
+                    break
+
+        return await asyncio.to_thread(
+            self._sync_exchange_sync,
+            signal_id=signal_id,
+            state=state,
+            order_id=order_id,
+            symbol=symbol,
+            market_type=market_type
+        )
+
+    async def _resolve_symbol(self, signal_id: str, state: Any, local_store: Any) -> str:
+        """Robustly resolve the order symbol from state, events, or policies. Raises ValueError on failure."""
+        if state.order_symbol:
+            return state.order_symbol
+            
+        # Try events
+        events = await local_store.get_events_for_signal(signal_id, limit=50)
+        for event in events:
+            for key in ("symbol", "asset_pair", "assetPair", "order_symbol"):
+                if key in event.payload and event.payload[key]:
+                    return str(event.payload[key])
+            if "signal" in event.payload and isinstance(event.payload["signal"], dict):
+                sig = event.payload["signal"]
+                for k in ("symbol", "asset_pair", "assetPair", "order_symbol"):
+                    if k in sig and sig[k]:
+                        return str(sig[k])
+            if "order" in event.payload and isinstance(event.payload["order"], dict):
+                ord_dict = event.payload["order"]
+                if "symbol" in ord_dict and ord_dict["symbol"]:
+                    return str(ord_dict["symbol"])
+                    
+        # Try policies
+        if state.policies:
+            for key in ("symbol", "asset_pair", "assetPair", "order_symbol"):
+                if key in state.policies and state.policies[key]:
+                    return str(state.policies[key])
+                    
+        raise ValueError(f"Could not resolve symbol for signal_id={signal_id}")
+
     # ── Execution ──────────────────────────────────────────────────────────
 
     def _execute_signal_sync(self, payload: dict[str, Any]) -> ExecutionResult:
@@ -799,6 +872,248 @@ class CcxtSignalExecutor:
                 if key in params
             },
         }
+
+    def _create_synthetic_event(
+        self,
+        signal_id: str,
+        event_type: Any,
+        payload: dict[str, Any],
+        timestamp: float | None = None
+    ) -> Any:
+        from datetime import datetime, timezone
+        from .execution_event_transport import ExecutionEvent
+        import uuid
+        
+        ts = timestamp or time.time()
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        
+        return ExecutionEvent(
+            event_id=f"sync-{signal_id}-{event_type.value.lower()}-{uuid.uuid4().hex[:8]}",
+            signal_id=signal_id,
+            sequence=0,
+            event_type=event_type,
+            sent_at=dt,
+            exchange_time=dt,
+            payload=payload,
+        )
+
+    def _sync_exchange_sync(
+        self,
+        signal_id: str,
+        state: Any,
+        order_id: str | None,
+        symbol: str,
+        market_type: str
+    ) -> list[Any]:
+        from .execution_event_transport import ExecutionEventType
+        events = []
+        exchange = self._get_exchange(market_type)
+        
+        order = None
+        # 1. Fetch order details if order_id is present
+        if order_id:
+            try:
+                order = exchange.fetch_order(order_id, symbol)
+            except Exception as e:
+                self._logger.warning(
+                    "sync_exchange: fetch_order failed for order_id=%s symbol=%s error=%s",
+                    order_id, symbol, e
+                )
+                
+        # 2. If order not found, search exchange orders by clientOrderId (signal_id)
+        if not order:
+            try:
+                all_orders = []
+                if hasattr(exchange, 'fetch_orders'):
+                    try:
+                        all_orders = exchange.fetch_orders(symbol)
+                    except Exception:
+                        pass
+                if not all_orders:
+                    if hasattr(exchange, 'fetch_open_orders'):
+                        try:
+                            all_orders.extend(exchange.fetch_open_orders(symbol))
+                        except Exception:
+                            pass
+                    if hasattr(exchange, 'fetch_closed_orders'):
+                        try:
+                            all_orders.extend(exchange.fetch_closed_orders(symbol))
+                        except Exception:
+                            pass
+                
+                for ord_item in all_orders:
+                    client_order_id = ord_item.get("clientOrderId") or ord_item.get("info", {}).get("clientOrderId")
+                    if client_order_id == signal_id or ord_item.get("id") == order_id:
+                        order = ord_item
+                        break
+            except Exception as e:
+                self._logger.warning(
+                    "sync_exchange: Failed to search orders for symbol=%s error=%s",
+                    symbol, e
+                )
+                
+        # 3. Determine order fill status and generate events
+        order_state = state.order_state
+        order_filled = False
+        
+        if order:
+            ccxt_status = order.get("status")  # open, closed, canceled, rejected
+            resolved_order_id = order.get("id") or order_id or signal_id
+            
+            if ccxt_status == "open":
+                if order_state == "NONE":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_PLACED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+            elif ccxt_status == "closed":
+                order_filled = True
+                fill_price = order.get("price") or order.get("average") or 0.0
+                if order_state == "NONE":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_PLACED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_FILLED,
+                        {"order_id": resolved_order_id, "symbol": symbol, "fill_price": fill_price}
+                    ))
+                elif order_state == "PLACED":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_FILLED,
+                        {"order_id": resolved_order_id, "symbol": symbol, "fill_price": fill_price}
+                    ))
+            elif ccxt_status in ("canceled", "expired"):
+                if order_state == "NONE":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_PLACED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_CANCELED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+                elif order_state == "PLACED":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_CANCELED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+            elif ccxt_status == "rejected":
+                if order_state == "NONE":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_PLACED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_FAILED,
+                        {"order_id": resolved_order_id, "symbol": symbol, "error": "Order rejected by exchange"}
+                    ))
+                elif order_state == "PLACED":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_FAILED,
+                        {"order_id": resolved_order_id, "symbol": symbol, "error": "Order rejected by exchange"}
+                    ))
+        
+        # 4. Position state logic
+        position_state = state.position_state
+        
+        if market_type == "FUTURE":
+            pos_size = 0.0
+            try:
+                if hasattr(exchange, "fetch_positions"):
+                    positions = exchange.fetch_positions([symbol])
+                    for pos in positions:
+                        if pos.get("symbol") == symbol:
+                            pos_size = abs(float(pos.get("contracts") or pos.get("size") or 0.0))
+                            break
+            except Exception as e:
+                self._logger.warning(
+                    "sync_exchange: fetch_positions failed for symbol=%s error=%s",
+                    symbol, e
+                )
+                
+            is_position_open = pos_size > 0.0
+            
+            if is_position_open:
+                if not order_filled and order_state not in ("FILLED",):
+                    resolved_order_id = (order.get("id") if order else None) or order_id or signal_id
+                    if order_state == "NONE":
+                        events.append(self._create_synthetic_event(
+                            signal_id,
+                            ExecutionEventType.ORDER_PLACED,
+                            {"order_id": resolved_order_id, "symbol": symbol}
+                        ))
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.ORDER_FILLED,
+                        {"order_id": resolved_order_id, "symbol": symbol}
+                    ))
+                    order_filled = True
+                
+                if position_state == "NONE":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.POSITION_OPENED,
+                        {"position_size": pos_size, "symbol": symbol}
+                    ))
+            else:
+                if position_state in ("OPENED", "UPDATING"):
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.POSITION_CLOSED,
+                        {"symbol": symbol}
+                    ))
+                elif position_state == "NONE":
+                    if order_filled or (order and order.get("status") == "closed"):
+                        if not order_filled and order_state not in ("FILLED",):
+                            resolved_order_id = order.get("id") or order_id or signal_id
+                            if order_state == "NONE":
+                                events.append(self._create_synthetic_event(
+                                    signal_id,
+                                    ExecutionEventType.ORDER_PLACED,
+                                    {"order_id": resolved_order_id, "symbol": symbol}
+                                ))
+                            events.append(self._create_synthetic_event(
+                                signal_id,
+                                ExecutionEventType.ORDER_FILLED,
+                                {"order_id": resolved_order_id, "symbol": symbol}
+                            ))
+                        events.append(self._create_synthetic_event(
+                            signal_id,
+                            ExecutionEventType.POSITION_OPENED,
+                            {"symbol": symbol}
+                        ))
+                        events.append(self._create_synthetic_event(
+                            signal_id,
+                            ExecutionEventType.POSITION_CLOSED,
+                            {"symbol": symbol}
+                        ))
+        
+        elif market_type == "SPOT":
+            if order_filled or (order and order.get("status") == "closed"):
+                if position_state == "NONE":
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.POSITION_OPENED,
+                        {"symbol": symbol}
+                    ))
+                    events.append(self._create_synthetic_event(
+                        signal_id,
+                        ExecutionEventType.POSITION_CLOSED,
+                        {"symbol": symbol}
+                    ))
+                    
+        return events
 
     # ── Symbol normalisation ───────────────────────────────────────────────
 

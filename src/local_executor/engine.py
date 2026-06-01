@@ -12,6 +12,7 @@ from .ws_client import ResilientWebSocketClient
 from .recovery_manager import ExecutionRecoveryManager
 from .execution_state_engine import ExecutionStateEngine
 from .execution_event_transport import ExecutionEvent
+from .notifications import TelegramNotifier, build_executor_alert
 
 SignalHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -36,6 +37,11 @@ class LocalExecutorEngine:
         self._config = config
         self._logger = logging.getLogger(__name__)
         self._executor = CcxtSignalExecutor(config=config, logger=self._logger)
+        self._notifier = TelegramNotifier(
+            bot_token=config.telegram_bot_token,
+            chat_id=config.telegram_chat_id,
+            logger=self._logger,
+        )
         self._local_store = local_store
         # Created once local_store is initialized in `run()`
         self._state_engine: ExecutionStateEngine | None = None
@@ -53,6 +59,7 @@ class LocalExecutorEngine:
             on_signal=self._handle_signal,
             on_resync=self._on_resync,
             on_replay_response=self._handle_replay_response,
+            on_connection_loss=self._notify_connection_loss,
             bot_id=config.bot_id,
             protocol_version=config.protocol_version,
             handshake_ack_required=config.handshake_ack_required,
@@ -93,6 +100,11 @@ class LocalExecutorEngine:
                         repr(exc),
                     )
                     self._logger.debug("Full traceback:", exc_info=exc)
+                    await self._notify(
+                        "Fatal executor task error",
+                        task=t.get_name(),
+                        error=f"{exc.__class__.__name__}: {exc}",
+                    )
                     raise exc
         finally:
             self._logger.info("Shutting down engine tasks.")
@@ -151,6 +163,15 @@ class LocalExecutorEngine:
                 "Signal execution errors signal_id=%s errors=%s",
                 signal_id or "unknown",
                 result.errors,
+            )
+            await self._notify(
+                "Execution error",
+                bot_id=self._config.bot_id,
+                signal_id=signal_id or "unknown",
+                action=action,
+                symbol=symbol,
+                mode=result.mode,
+                errors="; ".join(str(error) for error in result.errors),
             )
 
         # --- Update local state ---
@@ -214,6 +235,14 @@ class LocalExecutorEngine:
                                 self._logger.warning("Executor cancel_order failed for signal_id=%s error=%s", sid, e)
                             await self._local_store.append_sweeper_event(sid, "CANCEL", "deadline_expired")
                             await self._local_store.update_signal_state(sid, order_state="CANCELED")
+                            await self._notify(
+                                "Emergency order cancel sweep",
+                                bot_id=self._config.bot_id,
+                                signal_id=sid,
+                                order_id=state.order_id,
+                                symbol=state.order_symbol,
+                                reason="deadline_expired",
+                            )
 
                         if close_ts is not None and int(close_ts) > 0 and now_epoch > int(close_ts):
                             # Force-close position locally and append sweeper event
@@ -231,6 +260,13 @@ class LocalExecutorEngine:
                                     position_state="CLOSED",
                                     order_state="CANCELED",
                                     closed_at=__import__("datetime").datetime.utcnow(),
+                                )
+                                await self._notify(
+                                    "Emergency forced-close sweep",
+                                    bot_id=self._config.bot_id,
+                                    signal_id=sid,
+                                    symbol=state.order_symbol,
+                                    reason="deadline_expired",
                                 )
                     except Exception as e:
                         self._logger.warning("Sweeper failed for signal_id=%s error=%s", sid, e)
@@ -279,15 +315,27 @@ class LocalExecutorEngine:
                 self._replay_waiters.pop(signal_id, None)
                 return []
 
-        # Minimal exchange sync - placeholder returning no exchange events
+        # CCXT-based exchange sync to reconcile local state with exchange state
         async def sync_exchange_func(signal_id: str) -> list[ExecutionEvent]:
-            return []
+            return await self._executor.sync_exchange(signal_id, self._local_store)
 
         try:
             status = await self._recovery_manager.recover(fetch_history_func=fetch_history_func, sync_exchange_func=sync_exchange_func)
             self._logger.info("Recovery status: phase=%s errors=%s", status.phase.value, status.errors)
         except Exception as e:
             self._logger.error("Recovery run failed: %s", e, exc_info=True)
+
+    async def _notify_connection_loss(self, reason: str) -> None:
+        await self._notify(
+            "WebSocket connection lost",
+            bot_id=self._config.bot_id,
+            reason=reason,
+        )
+
+    async def _notify(self, title: str, **fields: Any) -> None:
+        if not self._notifier.enabled:
+            return
+        await self._notifier.send(build_executor_alert(title, **fields))
 
     async def _handle_replay_response(self, payload: dict[str, Any]) -> None:
         """Handle `replay-response` frames from backend and resolve waiting futures."""
