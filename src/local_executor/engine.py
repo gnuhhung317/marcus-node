@@ -9,6 +9,9 @@ from .config import ExecutorConfig
 from .execution import CcxtSignalExecutor
 from .local_store import LocalExecutionStore
 from .ws_client import ResilientWebSocketClient
+from .recovery_manager import ExecutionRecoveryManager
+from .execution_state_engine import ExecutionStateEngine
+from .execution_event_transport import ExecutionEvent
 
 SignalHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -34,6 +37,11 @@ class LocalExecutorEngine:
         self._logger = logging.getLogger(__name__)
         self._executor = CcxtSignalExecutor(config=config, logger=self._logger)
         self._local_store = local_store
+        # Created once local_store is initialized in `run()`
+        self._state_engine: ExecutionStateEngine | None = None
+        self._recovery_manager: ExecutionRecoveryManager | None = None
+        # Futures waiting for replay responses keyed by signal_id
+        self._replay_waiters: dict[str, asyncio.Future] = {}
         self._on_signal = on_signal or self._default_signal_handler
         self._ws_client = ResilientWebSocketClient(
             ws_url=config.ws_url,
@@ -44,6 +52,7 @@ class LocalExecutorEngine:
             reconnect_max_delay_seconds=config.reconnect_max_delay_seconds,
             on_signal=self._handle_signal,
             on_resync=self._on_resync,
+            on_replay_response=self._handle_replay_response,
             bot_id=config.bot_id,
             protocol_version=config.protocol_version,
             handshake_ack_required=config.handshake_ack_required,
@@ -58,6 +67,13 @@ class LocalExecutorEngine:
         # Initialise the local store if provided but not yet open
         if self._local_store is not None:
             await self._local_store.initialize()
+
+        # Instantiate state engine and recovery manager once store is ready
+        if self._local_store is not None and self._state_engine is None:
+            self._state_engine = ExecutionStateEngine(self._local_store, logger=self._logger)
+            self._recovery_manager = ExecutionRecoveryManager(
+                store=self._local_store, state_engine=self._state_engine, logger=self._logger
+            )
 
         self._logger.info("Starting LocalExecutorEngine.")
         tasks = [
@@ -232,6 +248,73 @@ class LocalExecutorEngine:
 
     async def _on_resync(self, reason: str) -> None:
         self._logger.info("Resync triggered reason=%s", reason)
+
+        if self._local_store is None or self._recovery_manager is None:
+            self._logger.debug("Skipping recovery - local store or recovery manager not configured.")
+            return
+
+        # Define fetch_history_func that requests replay via websocket and waits for a response
+        async def fetch_history_func(signal_id: str, from_sequence: int = 0) -> list[ExecutionEvent]:
+            # Prepare a future and send replay-request frame
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            self._replay_waiters[signal_id] = fut
+
+            frame = {
+                "type": "replay-request",
+                "botId": self._config.bot_id,
+                "payload": {"signalId": signal_id, "fromSequence": from_sequence},
+            }
+            try:
+                await self._ws_client.send_frame(frame)
+            except Exception as e:
+                self._logger.warning("Failed to send replay request for %s: %s", signal_id, e)
+                self._replay_waiters.pop(signal_id, None)
+                return []
+
+            try:
+                events = await asyncio.wait_for(fut, timeout=10.0)
+                return events or []
+            except asyncio.TimeoutError:
+                self._logger.warning("Timed out waiting for replay response for signal_id=%s", signal_id)
+                self._replay_waiters.pop(signal_id, None)
+                return []
+
+        # Minimal exchange sync - placeholder returning no exchange events
+        async def sync_exchange_func(signal_id: str) -> list[ExecutionEvent]:
+            return []
+
+        try:
+            status = await self._recovery_manager.recover(fetch_history_func=fetch_history_func, sync_exchange_func=sync_exchange_func)
+            self._logger.info("Recovery status: phase=%s errors=%s", status.phase.value, status.errors)
+        except Exception as e:
+            self._logger.error("Recovery run failed: %s", e, exc_info=True)
+
+    async def _handle_replay_response(self, payload: dict[str, Any]) -> None:
+        """Handle `replay-response` frames from backend and resolve waiting futures."""
+        try:
+            signal_id = payload.get("signalId") or payload.get("signal_id")
+            events_raw = payload.get("events") or []
+            if not signal_id:
+                self._logger.warning("Received replay-response without signalId")
+                return
+
+            fut = self._replay_waiters.pop(signal_id, None)
+            if fut is None:
+                self._logger.debug("No waiter for replay-response signal_id=%s", signal_id)
+                return
+
+            events: list[ExecutionEvent] = []
+            for item in events_raw:
+                try:
+                    events.append(ExecutionEvent.from_json(item))
+                except Exception as e:
+                    self._logger.warning("Failed to parse replay event for signal_id=%s error=%s", signal_id, e)
+
+            if not fut.done():
+                fut.set_result(events)
+
+        except Exception as e:
+            self._logger.error("Error handling replay-response: %s", e, exc_info=True)
 
     # ── Balance sync loop ──────────────────────────────────────────────────
 

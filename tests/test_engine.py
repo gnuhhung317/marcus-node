@@ -531,6 +531,119 @@ class CcxtSignalExecutorMultiMarketTest(unittest.TestCase):
         self.assertEqual(executor._get_exchange("FUTURE"), mock_ex)
 
 
+class CcxtSignalExecutorUpdateTpSlTest(unittest.IsolatedAsyncioTestCase):
+    def _executor(self, execution_mode: str = "live") -> CcxtSignalExecutor:
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=1.0,
+            default_order_type="market",
+            execution_mode=execution_mode,
+        )
+        return CcxtSignalExecutor(config)
+
+    async def test_should_dry_run_update_tp_sl(self) -> None:
+        executor = self._executor(execution_mode="dry-run")
+
+        result = await executor.execute_signal(
+            {
+                "signal_id": "sig-update",
+                "action": "UPDATE_TP_SL",
+                "symbol": "BTCUSDT",
+                "tp": 71000,
+                "sl": 64000,
+            }
+        )
+
+        self.assertEqual(result.mode, "dry-run")
+        self.assertEqual(result.details["symbol"], "BTC/USDT")
+        self.assertEqual(result.details["take_profit"], 71000.0)
+        self.assertEqual(result.details["stop_loss"], 64000.0)
+
+    async def test_should_modify_matching_tp_sl_orders_when_supported(self) -> None:
+        from unittest.mock import MagicMock
+
+        executor = self._executor()
+        exchange = MagicMock()
+        exchange.has = {"modifyOrder": True}
+        exchange.fetch_open_orders.return_value = [
+            {
+                "id": "tp-1",
+                "symbol": "BTC/USDT",
+                "type": "take_profit_market",
+                "side": "sell",
+                "amount": 0.25,
+                "price": 70000,
+                "params": {"reduceOnly": True},
+            }
+        ]
+        exchange.modify_order.return_value = {"id": "tp-1", "status": "open"}
+        executor._exchange = exchange
+
+        result = await executor.execute_signal(
+            {
+                "signal_id": "sig-update",
+                "action": "UPDATE_TP_SL",
+                "symbol": "BTCUSDT",
+                "order_id": "tp-1",
+                "tp": 71000,
+            }
+        )
+
+        self.assertEqual(result.mode, "live")
+        self.assertEqual(result.order_id, "tp-1")
+        self.assertEqual(result.details["strategy"], "modify_order")
+        exchange.modify_order.assert_called_once()
+        call_args = exchange.modify_order.call_args.args
+        self.assertEqual(call_args[0], "tp-1")
+        self.assertEqual(call_args[1], "BTC/USDT")
+        self.assertEqual(call_args[5], 71000.0)
+        self.assertEqual(call_args[6]["stopPrice"], 71000.0)
+
+    async def test_should_cancel_and_replace_when_modify_order_unsupported(self) -> None:
+        from unittest.mock import MagicMock
+
+        executor = self._executor()
+        exchange = MagicMock()
+        exchange.has = {"modifyOrder": False}
+        exchange.fetch_open_orders.return_value = [
+            {
+                "id": "sl-1",
+                "symbol": "ETH/USDT",
+                "type": "stop_loss_market",
+                "side": "sell",
+                "amount": 1.5,
+                "price": 3200,
+                "params": {"reduceOnly": True},
+            }
+        ]
+        exchange.create_order.return_value = {"id": "sl-2", "status": "open"}
+        executor._exchange = exchange
+
+        result = await executor.execute_signal(
+            {
+                "signal_id": "sig-update",
+                "action": "UPDATE_TP_SL",
+                "symbol": "ETHUSDT",
+                "sl": 3150,
+            }
+        )
+
+        self.assertEqual(result.mode, "live")
+        self.assertEqual(result.order_id, "sl-2")
+        self.assertEqual(result.details["strategy"], "cancel_replace")
+        exchange.cancel_order.assert_called_once_with("sl-1", "ETH/USDT")
+        exchange.create_order.assert_called_once()
+        call_args = exchange.create_order.call_args.args
+        self.assertEqual(call_args[0], "ETH/USDT")
+        self.assertEqual(call_args[4], 3150.0)
+        self.assertEqual(call_args[5]["stopPrice"], 3150.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

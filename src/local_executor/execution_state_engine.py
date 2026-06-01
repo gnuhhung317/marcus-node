@@ -248,10 +248,14 @@ class ExecutionStateEngine:
 
         # Signal state
         if event_type == ExecutionEventType.SIGNAL_ACCEPTED:
+            policies = event.payload.get("policies")
+            order_symbol = event.payload.get("symbol") or event.payload.get("order_symbol") or event.payload.get("asset_pair") or event.payload.get("assetPair")
             await self._store.update_signal_state(
                 event.signal_id,
                 signal_state="OPEN",
                 last_sequence=event.sequence,
+                policies=policies,
+                order_symbol=order_symbol,
             )
 
         elif event_type == ExecutionEventType.SIGNAL_REJECTED:
@@ -263,17 +267,23 @@ class ExecutionStateEngine:
 
         # Order state
         elif event_type == ExecutionEventType.ORDER_PLACED:
+            order_id = event.payload.get("order_id") or event.payload.get("id")
+            order_symbol = event.payload.get("symbol") or event.payload.get("order_symbol") or event.payload.get("asset_pair") or event.payload.get("assetPair")
             await self._store.update_signal_state(
                 event.signal_id,
                 order_state="PLACED",
                 last_sequence=event.sequence,
+                order_id=order_id,
+                order_symbol=order_symbol,
             )
 
         elif event_type == ExecutionEventType.ORDER_FILLED:
+            order_id = event.payload.get("order_id") or event.payload.get("id")
             await self._store.update_signal_state(
                 event.signal_id,
                 order_state="FILLED",
                 last_sequence=event.sequence,
+                order_id=order_id,
             )
 
         elif event_type == ExecutionEventType.ORDER_FAILED:

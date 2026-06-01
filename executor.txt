@@ -94,6 +94,84 @@ tests/test_ws_client.py
 <files>
 This section contains the contents of the repository's files.
 
+<file path=".gitignore">
+__pycache__/
+</file>
+
+<file path="ARCHITECTURE.md">
+# Kiến trúc Hệ thống Local Executor Client
+
+## 1. Tổng quan (Overview)
+Dự án là một Python-based Executor Client, thành phần then chốt trong hệ thống giao dịch Marcus. Nhiệm vụ chính là nhận tín hiệu từ Cloud Backend và thực thi lệnh ngay lập tức trên sàn giao dịch của người dùng để giảm thiểu độ trễ và tăng tính bảo mật (API Key được lưu trữ cục bộ, không rời khỏi máy người dùng).
+
+## 2. Bản đồ Module (Module Map)
+
+### [CLI]
+- **File**: `src/local_executor/cli.py`
+- **Responsibility**: Khởi tạo ứng dụng, nạp cấu hình từ biến môi trường và thiết lập logging.
+- **Depends on**: `ExecutorConfig`, `LocalExecutorEngine`, `env_loader`.
+- **Called by**: `local_executor.py` (root wrapper), `project.scripts`.
+- **Key decision**: Tách biệt logic nạp môi trường (`env_loader`) khỏi logic khởi chạy engine.
+
+### [Engine]
+- **File**: `src/local_executor/engine.py`
+- **Responsibility**: Điều phối chính luồng nhận tín hiệu và đẩy các bản tin giám sát (audit-push).
+- **Depends on**: `ResilientWebSocketClient`, `CcxtSignalExecutor`, `ExecutorConfig`.
+- **Called by**: `cli.py`.
+- **Key decision**: Sử dụng `asyncio.wait` với `FIRST_COMPLETED` để quản lý đồng thời kết nối WebSocket và luồng đồng bộ số dư (`_balance_sync_loop`).
+
+### [Executor]
+- **File**: `src/local_executor/execution.py`
+- **Responsibility**: Kiểm tra tính hợp lệ (validate) của tín hiệu và thực thi lệnh giao dịch qua thư viện CCXT.
+- **Depends on**: `ccxt`, `ExecutorConfig`.
+- **Called by**: `LocalExecutorEngine`.
+- **Key decision**: Hỗ trợ chế độ `dry-run` để kiểm tra logic mà không thực hiện giao dịch thật.
+
+### [WebSocket Client]
+- **File**: `src/local_executor/ws_client.py`
+- **Responsibility**: Duy trì kết nối WebSocket bền bỉ, xử lý xác thực HMAC và phân loại tin nhắn từ backend.
+- **Depends on**: `websockets`, `hmac`, `hashlib`.
+- **Called by**: `LocalExecutorEngine`.
+- **Key decision**: Handshake sử dụng HMAC-SHA256 để đảm bảo tính xác thực của client.
+
+### [Local Store]
+- **File**: `src/local_executor/local_store.py`
+- **Responsibility**: Lưu trữ bền bỉ trạng thái lệnh và các sự kiện thực thi vào cơ sở dữ liệu SQLite cục bộ.
+- **Depends on**: `sqlite3`.
+- **Called by**: `ExecutionStateEngine`, `ExecutionRecoveryManager`.
+- **Key decision**: Áp dụng Outbox pattern cho việc gửi ACK để đảm bảo dữ liệu không bị mất khi mạng lỗi.
+
+## 3. Luồng dữ liệu (Data Flow)
+
+Hệ thống vận hành theo mô hình hướng sự kiện (event-driven):
+
+1. **Nhận tín hiệu**: 
+   - Backend Cloud -> `ResilientWebSocketClient` (Signal Frame) -> `LocalExecutorEngine`.
+2. **Thực thi lệnh**:
+   - `LocalExecutorEngine` -> `CcxtSignalExecutor` -> Sàn giao dịch (Exchange via CCXT).
+3. **Phản hồi & Giám sát**:
+   - Sàn giao dịch -> `CcxtSignalExecutor` (Result) -> `ExecutionEvent`.
+   - `ExecutionEvent` -> `LocalExecutionStore` (Save to SQLite) -> `ExecutionACK` -> Backend Cloud.
+4. **Đồng bộ trạng thái**:
+   - `_balance_sync_loop` định kỳ lấy số dư từ sàn và gửi 'audit-push' về backend để cập nhật dashboard.
+
+## 4. Phụ thuộc bên ngoài (External Dependencies)
+
+- **CCXT**: Thư viện tiêu chuẩn để tương tác với hàng trăm sàn giao dịch Crypto khác nhau.
+- **websockets**: Dùng để duy trì kết nối real-time hai chiều với backend.
+- **sqlite3**: Dùng cho lưu trữ trạng thái cục bộ, hỗ trợ phục hồi sau sự cố.
+
+## 5. Các khu vực rủi ro (Risk Areas)
+
+- **Đồng bộ hóa trạng thái**: Việc duy trì sự đồng nhất giữa Local Store, Backend và Exchange trong điều kiện mạng không ổn định là thách thức lớn nhất (đang được xử lý bởi `RecoveryManager`).
+- **Độ trễ thực thi**: Hiệu năng phụ thuộc vào tốc độ phản hồi của thư viện CCXT và mạng từ máy người dùng đến API của sàn.
+- **Bảo mật API Key**: API Key được lưu tại file `.env` cục bộ. Người dùng cần được khuyến cáo bảo vệ file này tuyệt đối.
+- **Xử lý Frame lỗi**: Hiện tại chỉ mới dừng lại ở việc tăng counter lỗi trong `ws_client.py`, cần bổ sung thêm cơ chế cảnh báo chủ động.
+
+---
+*Tài liệu này được tạo tự động sau quá trình khám phá codebase.*
+</file>
+
 <file path="Dockerfile.executor">
 FROM python:3.11-slim
 
@@ -165,6 +243,10 @@ After full exploration, produce a file called `ARCHITECTURE.md` at project root.
 Structure it as: Overview → Module map → Data flow → External dependencies → Risk areas
 </file>
 
+<file path="local_executor.py">
+# pyright: reportMissingImports=false
+</file>
+
 <file path="scripts/.e2e_provision_state.json">
 {
   "base_url": "https://marcus-api.tromoi.xyz",
@@ -226,6 +308,115 @@ sig = generate_hmac(payload, bot_signer_secret, timestamp)
 sig = None
 ⋮----
 r = requests.post(url, headers=headers, data=body, timeout=10)
+</file>
+
+<file path="scripts/probe_ws_handshake.py">
+#!/usr/bin/env python3
+"""Probe WebSocket handshake status codes for common dispatcher paths.
+
+Reads `.e2e_provision_state.json` for host and token, then tries candidate paths.
+Prints exception status codes and response headers to help diagnose InvalidStatusCode.
+"""
+⋮----
+STATE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
+⋮----
+def load_state() -> dict
+⋮----
+async def try_connect(url: str, token: str) -> None
+⋮----
+# websockets exposes the status code on this exception
+code = getattr(e, "status_code", None)
+⋮----
+async def main()
+⋮----
+state = load_state()
+token = state.get("ws_token") or state.get("subscription_response", {}).get("wsToken")
+⋮----
+# Host and port from user-provided dispatcher
+host = "171.244.195.150:8081"
+⋮----
+candidates = [
+⋮----
+url = f"ws://{host}{p}"
+</file>
+
+<file path="scripts/run_signal_smoke.py">
+#!/usr/bin/env python3
+"""Run a quick signal -> executor smoke test (dry-run).
+
+- Reads provisioning state from `.e2e_provision_state.json` for `bot_id`.
+- Sets minimal environment variables required by `ExecutorConfig`.
+- Calls `CcxtSignalExecutor.execute_signal` for two synthetic signals.
+"""
+⋮----
+STATE_FILE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
+⋮----
+def load_state() -> dict
+⋮----
+def prepare_env_from_state(state: dict) -> None
+⋮----
+# Minimal envs required by ExecutorConfig.from_env
+⋮----
+# WS url/token unused for direct executor call, but set for completeness
+⋮----
+# Exchange dummy values for dry-run
+⋮----
+async def run_smoke()
+⋮----
+state = load_state()
+⋮----
+# configure logging
+⋮----
+logger = logging.getLogger("signal-smoke")
+⋮----
+config = ExecutorConfig.from_env()
+executor = CcxtSignalExecutor(config=config, logger=logger)
+⋮----
+# two signals: market open and limit close
+signals = [
+⋮----
+result = await executor.execute_signal(s)
+⋮----
+def main()
+</file>
+
+<file path="scripts/ws_simulator.py">
+"""Simple WebSocket simulator to reproduce handshake + immediate close behavior.
+
+Run this locally and point `SYSTEM_WS_URL` to ws://localhost:8765 to test the client.
+"""
+⋮----
+LOG = logging.getLogger("ws_simulator")
+⋮----
+async def handler(ws, path)
+⋮----
+raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+⋮----
+# Reply with handshake-ack then close after short delay
+ack = {"type": "handshake-ack", "payload": {"status": "ok", "ack_type": "handshake"}}
+⋮----
+def main()
+⋮----
+port = int(os.getenv("WS_SIMULATOR_PORT", "9876"))
+stop = asyncio.Event()
+⋮----
+async def _run()
+⋮----
+server = await websockets.serve(handler, "0.0.0.0", port)
+⋮----
+def _signal(_sig, _frame)
+</file>
+
+<file path="src/local_executor/env_loader.py">
+def load_env_file(path: str | Path = ".env") -> None
+⋮----
+"""Load key-value pairs from a .env file into process environment."""
+env_path = Path(path)
+⋮----
+line = raw_line.strip()
+⋮----
+key = key.strip()
+value = value.strip().strip('"').strip("'")
 </file>
 
 <file path="src/marcus_local_executor.egg-info/dependency_links.txt">
@@ -455,6 +646,121 @@ tests/test_ws_client.py
 local_executor
 </file>
 
+<file path="tests/conftest.py">
+"""Pytest configuration for local-executor-client tests."""
+⋮----
+# Add src/ to path for imports
+src_path = Path(__file__).parent.parent / "src"
+</file>
+
+<file path="tests/fixtures/contracts/ws_ack_invalid_v1.json">
+{
+  "type": "ack",
+  "payload": {
+    "status": "denied",
+    "ack_type": "subscribe"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_ack_valid_v1.json">
+{
+  "type": "ack",
+  "payload": {
+    "status": "ok",
+    "ack_type": "subscribe"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_handshake_subscribe_v1.json">
+{
+  "type": "subscribe",
+  "payload": {
+    "bot_id": "bot-fixture-01",
+    "protocol_version": "1.0",
+    "stream": "signal_execution",
+    "mode": "consume_only"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_heartbeat_v1.json">
+{
+  "type": "heartbeat",
+  "payload": {
+    "status": "ok"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_signal_envelope_v1.json">
+{
+  "type": "signal",
+  "payload": {
+    "signal_id": "fixture-sig-1",
+    "action": "OPEN_LONG",
+    "symbol": "BTCUSDT"
+  }
+}
+</file>
+
+<file path="tests/fixtures/contracts/ws_unsupported_v1.json">
+{
+  "type": "snapshot",
+  "payload": {
+    "items": []
+  }
+}
+</file>
+
+<file path="tests/test_chaos_recovery.py">
+@pytest.mark.asyncio
+async def test_recovery_discovery_ignores_closed_signals()
+⋮----
+"""
+    SIMULATED CHAOS: Reboot executor and ensure auto-discovery only picks up 
+    dangling (open) signals and ignores fully completed (closed) ones.
+    """
+# Setup clean DB
+store = LocalExecutionStore(":memory:")
+⋮----
+# Signal 1: Completed and closed (SHOULD BE IGNORED)
+⋮----
+# Signal 2: Half-baked, dangling due to process crash (SHOULD BE RECOVERED)
+⋮----
+# Mock out state engine
+mock_engine = MagicMock()
+⋮----
+# Instantiate Recovery Manager (simulating Reboot)
+mgr = ExecutionRecoveryManager(store, mock_engine)
+⋮----
+# Act: Run bootstrap phase
+discovered = await mgr._bootstrap_signals([])
+⋮----
+# Assert: Discovery strictly filters active boundaries
+⋮----
+@pytest.mark.asyncio
+async def test_clean_boundary_expiry_enforcement()
+⋮----
+"""
+    Verify the clean boundary deadline enforcer proactively drops expired signals.
+    """
+config = ExecutorConfig(
+executor = CcxtSignalExecutor(config)
+⋮----
+# Payload A: Legitimate & fresh
+fresh_payload = {
+⋮----
+"cancel_after_timestamp": time.time() + 600 # expires in 10 min
+⋮----
+result_fresh = await executor.execute_signal(fresh_payload)
+⋮----
+# Payload B: Rotted / Delayed arrival (Expires 10s AGO)
+stale_payload = {
+result_stale = await executor.execute_signal(stale_payload)
+</file>
+
 <file path="tests/test_end2end_provision_and_connect.py">
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "end2end_provision_and_connect.py"
 ⋮----
@@ -486,88 +792,6 @@ def fake_post(url, headers=None, timeout=None)
 def fake_get(url, headers=None, timeout=None)
 ⋮----
 result = provision_script.subscribe_bot("https://example.test", "trader-token", "bot_1")
-</file>
-
-<file path=".gitignore">
-__pycache__/
-</file>
-
-<file path="ARCHITECTURE.md">
-# Kiến trúc Hệ thống Local Executor Client
-
-## 1. Tổng quan (Overview)
-Dự án là một Python-based Executor Client, thành phần then chốt trong hệ thống giao dịch Marcus. Nhiệm vụ chính là nhận tín hiệu từ Cloud Backend và thực thi lệnh ngay lập tức trên sàn giao dịch của người dùng để giảm thiểu độ trễ và tăng tính bảo mật (API Key được lưu trữ cục bộ, không rời khỏi máy người dùng).
-
-## 2. Bản đồ Module (Module Map)
-
-### [CLI]
-- **File**: `src/local_executor/cli.py`
-- **Responsibility**: Khởi tạo ứng dụng, nạp cấu hình từ biến môi trường và thiết lập logging.
-- **Depends on**: `ExecutorConfig`, `LocalExecutorEngine`, `env_loader`.
-- **Called by**: `local_executor.py` (root wrapper), `project.scripts`.
-- **Key decision**: Tách biệt logic nạp môi trường (`env_loader`) khỏi logic khởi chạy engine.
-
-### [Engine]
-- **File**: `src/local_executor/engine.py`
-- **Responsibility**: Điều phối chính luồng nhận tín hiệu và đẩy các bản tin giám sát (audit-push).
-- **Depends on**: `ResilientWebSocketClient`, `CcxtSignalExecutor`, `ExecutorConfig`.
-- **Called by**: `cli.py`.
-- **Key decision**: Sử dụng `asyncio.wait` với `FIRST_COMPLETED` để quản lý đồng thời kết nối WebSocket và luồng đồng bộ số dư (`_balance_sync_loop`).
-
-### [Executor]
-- **File**: `src/local_executor/execution.py`
-- **Responsibility**: Kiểm tra tính hợp lệ (validate) của tín hiệu và thực thi lệnh giao dịch qua thư viện CCXT.
-- **Depends on**: `ccxt`, `ExecutorConfig`.
-- **Called by**: `LocalExecutorEngine`.
-- **Key decision**: Hỗ trợ chế độ `dry-run` để kiểm tra logic mà không thực hiện giao dịch thật.
-
-### [WebSocket Client]
-- **File**: `src/local_executor/ws_client.py`
-- **Responsibility**: Duy trì kết nối WebSocket bền bỉ, xử lý xác thực HMAC và phân loại tin nhắn từ backend.
-- **Depends on**: `websockets`, `hmac`, `hashlib`.
-- **Called by**: `LocalExecutorEngine`.
-- **Key decision**: Handshake sử dụng HMAC-SHA256 để đảm bảo tính xác thực của client.
-
-### [Local Store]
-- **File**: `src/local_executor/local_store.py`
-- **Responsibility**: Lưu trữ bền bỉ trạng thái lệnh và các sự kiện thực thi vào cơ sở dữ liệu SQLite cục bộ.
-- **Depends on**: `sqlite3`.
-- **Called by**: `ExecutionStateEngine`, `ExecutionRecoveryManager`.
-- **Key decision**: Áp dụng Outbox pattern cho việc gửi ACK để đảm bảo dữ liệu không bị mất khi mạng lỗi.
-
-## 3. Luồng dữ liệu (Data Flow)
-
-Hệ thống vận hành theo mô hình hướng sự kiện (event-driven):
-
-1. **Nhận tín hiệu**: 
-   - Backend Cloud -> `ResilientWebSocketClient` (Signal Frame) -> `LocalExecutorEngine`.
-2. **Thực thi lệnh**:
-   - `LocalExecutorEngine` -> `CcxtSignalExecutor` -> Sàn giao dịch (Exchange via CCXT).
-3. **Phản hồi & Giám sát**:
-   - Sàn giao dịch -> `CcxtSignalExecutor` (Result) -> `ExecutionEvent`.
-   - `ExecutionEvent` -> `LocalExecutionStore` (Save to SQLite) -> `ExecutionACK` -> Backend Cloud.
-4. **Đồng bộ trạng thái**:
-   - `_balance_sync_loop` định kỳ lấy số dư từ sàn và gửi 'audit-push' về backend để cập nhật dashboard.
-
-## 4. Phụ thuộc bên ngoài (External Dependencies)
-
-- **CCXT**: Thư viện tiêu chuẩn để tương tác với hàng trăm sàn giao dịch Crypto khác nhau.
-- **websockets**: Dùng để duy trì kết nối real-time hai chiều với backend.
-- **sqlite3**: Dùng cho lưu trữ trạng thái cục bộ, hỗ trợ phục hồi sau sự cố.
-
-## 5. Các khu vực rủi ro (Risk Areas)
-
-- **Đồng bộ hóa trạng thái**: Việc duy trì sự đồng nhất giữa Local Store, Backend và Exchange trong điều kiện mạng không ổn định là thách thức lớn nhất (đang được xử lý bởi `RecoveryManager`).
-- **Độ trễ thực thi**: Hiệu năng phụ thuộc vào tốc độ phản hồi của thư viện CCXT và mạng từ máy người dùng đến API của sàn.
-- **Bảo mật API Key**: API Key được lưu tại file `.env` cục bộ. Người dùng cần được khuyến cáo bảo vệ file này tuyệt đối.
-- **Xử lý Frame lỗi**: Hiện tại chỉ mới dừng lại ở việc tăng counter lỗi trong `ws_client.py`, cần bổ sung thêm cơ chế cảnh báo chủ động.
-
----
-*Tài liệu này được tạo tự động sau quá trình khám phá codebase.*
-</file>
-
-<file path="local_executor.py">
-# pyright: reportMissingImports=false
 </file>
 
 <file path="scripts/end2end_provision_and_connect.py">
@@ -792,101 +1016,10 @@ url=base.rstrip('/')+p
 r=requests.post(url,json={'email':'dev+e2e@example.com','password':'Password123!'},timeout=10)
 </file>
 
-<file path="scripts/probe_ws_handshake.py">
-#!/usr/bin/env python3
-"""Probe WebSocket handshake status codes for common dispatcher paths.
-
-Reads `.e2e_provision_state.json` for host and token, then tries candidate paths.
-Prints exception status codes and response headers to help diagnose InvalidStatusCode.
-"""
+<file path="src/local_executor/__init__.py">
+"""Marcus Local Executor package."""
 ⋮----
-STATE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
-⋮----
-def load_state() -> dict
-⋮----
-async def try_connect(url: str, token: str) -> None
-⋮----
-# websockets exposes the status code on this exception
-code = getattr(e, "status_code", None)
-⋮----
-async def main()
-⋮----
-state = load_state()
-token = state.get("ws_token") or state.get("subscription_response", {}).get("wsToken")
-⋮----
-# Host and port from user-provided dispatcher
-host = "171.244.195.150:8081"
-⋮----
-candidates = [
-⋮----
-url = f"ws://{host}{p}"
-</file>
-
-<file path="scripts/run_signal_smoke.py">
-#!/usr/bin/env python3
-"""Run a quick signal -> executor smoke test (dry-run).
-
-- Reads provisioning state from `.e2e_provision_state.json` for `bot_id`.
-- Sets minimal environment variables required by `ExecutorConfig`.
-- Calls `CcxtSignalExecutor.execute_signal` for two synthetic signals.
-"""
-⋮----
-STATE_FILE = Path(__file__).resolve().parent / ".e2e_provision_state.json"
-⋮----
-def load_state() -> dict
-⋮----
-def prepare_env_from_state(state: dict) -> None
-⋮----
-# Minimal envs required by ExecutorConfig.from_env
-⋮----
-# WS url/token unused for direct executor call, but set for completeness
-⋮----
-# Exchange dummy values for dry-run
-⋮----
-async def run_smoke()
-⋮----
-state = load_state()
-⋮----
-# configure logging
-⋮----
-logger = logging.getLogger("signal-smoke")
-⋮----
-config = ExecutorConfig.from_env()
-executor = CcxtSignalExecutor(config=config, logger=logger)
-⋮----
-# two signals: market open and limit close
-signals = [
-⋮----
-result = await executor.execute_signal(s)
-⋮----
-def main()
-</file>
-
-<file path="scripts/ws_simulator.py">
-"""Simple WebSocket simulator to reproduce handshake + immediate close behavior.
-
-Run this locally and point `SYSTEM_WS_URL` to ws://localhost:8765 to test the client.
-"""
-⋮----
-LOG = logging.getLogger("ws_simulator")
-⋮----
-async def handler(ws, path)
-⋮----
-raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
-⋮----
-# Reply with handshake-ack then close after short delay
-ack = {"type": "handshake-ack", "payload": {"status": "ok", "ack_type": "handshake"}}
-⋮----
-def main()
-⋮----
-port = int(os.getenv("WS_SIMULATOR_PORT", "9876"))
-stop = asyncio.Event()
-⋮----
-async def _run()
-⋮----
-server = await websockets.serve(handler, "0.0.0.0", port)
-⋮----
-def _signal(_sig, _frame)
+__all__ = [
 </file>
 
 <file path="src/local_executor/cli.py">
@@ -909,139 +1042,6 @@ local_store = LocalExecutionStore(db_path=db_path, logger=logging.getLogger("loc
 engine = LocalExecutorEngine(config=config, local_store=local_store)
 ⋮----
 def _configure_logging(level: str) -> None
-</file>
-
-<file path="src/local_executor/env_loader.py">
-def load_env_file(path: str | Path = ".env") -> None
-⋮----
-"""Load key-value pairs from a .env file into process environment."""
-env_path = Path(path)
-⋮----
-line = raw_line.strip()
-⋮----
-key = key.strip()
-value = value.strip().strip('"').strip("'")
-</file>
-
-<file path="tests/conftest.py">
-"""Pytest configuration for local-executor-client tests."""
-⋮----
-# Add src/ to path for imports
-src_path = Path(__file__).parent.parent / "src"
-</file>
-
-<file path="tests/fixtures/contracts/ws_ack_invalid_v1.json">
-{
-  "type": "ack",
-  "payload": {
-    "status": "denied",
-    "ack_type": "subscribe"
-  }
-}
-</file>
-
-<file path="tests/fixtures/contracts/ws_ack_valid_v1.json">
-{
-  "type": "ack",
-  "payload": {
-    "status": "ok",
-    "ack_type": "subscribe"
-  }
-}
-</file>
-
-<file path="tests/fixtures/contracts/ws_handshake_subscribe_v1.json">
-{
-  "type": "subscribe",
-  "payload": {
-    "bot_id": "bot-fixture-01",
-    "protocol_version": "1.0",
-    "stream": "signal_execution",
-    "mode": "consume_only"
-  }
-}
-</file>
-
-<file path="tests/fixtures/contracts/ws_heartbeat_v1.json">
-{
-  "type": "heartbeat",
-  "payload": {
-    "status": "ok"
-  }
-}
-</file>
-
-<file path="tests/fixtures/contracts/ws_signal_envelope_v1.json">
-{
-  "type": "signal",
-  "payload": {
-    "signal_id": "fixture-sig-1",
-    "action": "OPEN_LONG",
-    "symbol": "BTCUSDT"
-  }
-}
-</file>
-
-<file path="tests/fixtures/contracts/ws_unsupported_v1.json">
-{
-  "type": "snapshot",
-  "payload": {
-    "items": []
-  }
-}
-</file>
-
-<file path="tests/test_chaos_recovery.py">
-@pytest.mark.asyncio
-async def test_recovery_discovery_ignores_closed_signals()
-⋮----
-"""
-    SIMULATED CHAOS: Reboot executor and ensure auto-discovery only picks up 
-    dangling (open) signals and ignores fully completed (closed) ones.
-    """
-# Setup clean DB
-store = LocalExecutionStore(":memory:")
-⋮----
-# Signal 1: Completed and closed (SHOULD BE IGNORED)
-⋮----
-# Signal 2: Half-baked, dangling due to process crash (SHOULD BE RECOVERED)
-⋮----
-# Mock out state engine
-mock_engine = MagicMock()
-⋮----
-# Instantiate Recovery Manager (simulating Reboot)
-mgr = ExecutionRecoveryManager(store, mock_engine)
-⋮----
-# Act: Run bootstrap phase
-discovered = await mgr._bootstrap_signals([])
-⋮----
-# Assert: Discovery strictly filters active boundaries
-⋮----
-@pytest.mark.asyncio
-async def test_clean_boundary_expiry_enforcement()
-⋮----
-"""
-    Verify the clean boundary deadline enforcer proactively drops expired signals.
-    """
-config = ExecutorConfig(
-executor = CcxtSignalExecutor(config)
-⋮----
-# Payload A: Legitimate & fresh
-fresh_payload = {
-⋮----
-"cancel_after_timestamp": time.time() + 600 # expires in 10 min
-⋮----
-result_fresh = await executor.execute_signal(fresh_payload)
-⋮----
-# Payload B: Rotted / Delayed arrival (Expires 10s AGO)
-stale_payload = {
-result_stale = await executor.execute_signal(stale_payload)
-</file>
-
-<file path="src/local_executor/__init__.py">
-"""Marcus Local Executor package."""
-⋮----
-__all__ = [
 </file>
 
 <file path="src/local_executor/execution_event_transport.py">
@@ -1339,129 +1339,6 @@ now = event.exchange_time or event.sent_at
 # Position state
 </file>
 
-<file path="tests/test_engine.py">
-# pyright: reportMissingImports=false
-⋮----
-class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase)
-⋮----
-async def test_should_forward_signal_to_handler(self) -> None
-⋮----
-received: list[dict[str, Any]] = []
-⋮----
-async def on_signal(payload: dict[str, Any]) -> None
-⋮----
-config = ExecutorConfig(
-engine = LocalExecutorEngine(config=config, on_signal=on_signal)
-⋮----
-class SignalSchemaValidationTest(unittest.TestCase)
-⋮----
-def test_should_accept_minimal_valid_signal(self) -> None
-⋮----
-signal = {
-⋮----
-def test_should_reject_missing_signal_id(self) -> None
-⋮----
-def test_should_reject_empty_signal_id(self) -> None
-⋮----
-def test_should_reject_missing_action(self) -> None
-⋮----
-def test_should_reject_invalid_action(self) -> None
-⋮----
-def test_should_accept_valid_actions(self) -> None
-⋮----
-def test_should_reject_missing_symbol(self) -> None
-⋮----
-def test_should_accept_asset_pair_as_symbol_alias(self) -> None
-⋮----
-def test_should_accept_assetPair_as_symbol_alias(self) -> None
-⋮----
-def test_should_accept_market_order_type(self) -> None
-⋮----
-def test_should_accept_limit_order_type_with_price(self) -> None
-⋮----
-def test_should_reject_limit_order_type_without_price(self) -> None
-⋮----
-def test_should_reject_invalid_order_type(self) -> None
-⋮----
-def test_should_accept_amount_as_quantity(self) -> None
-⋮----
-def test_should_accept_amount_as_size(self) -> None
-⋮----
-def test_should_reject_negative_amount(self) -> None
-⋮----
-def test_should_reject_zero_amount(self) -> None
-⋮----
-def test_should_reject_non_numeric_amount(self) -> None
-⋮----
-def test_should_reject_non_dictionary_payload(self) -> None
-⋮----
-def test_should_accept_optional_fields(self) -> None
-⋮----
-class CcxtSignalExecutorBuildOrderTest(unittest.TestCase)
-⋮----
-def setUp(self) -> None
-⋮----
-def test_should_normalize_symbol_to_ccxt_format(self) -> None
-⋮----
-order = self.executor._build_order(signal)
-⋮----
-def test_should_handle_already_normalized_symbol(self) -> None
-⋮----
-def test_should_use_asset_pair_as_symbol(self) -> None
-⋮----
-def test_should_map_open_long_to_buy(self) -> None
-⋮----
-def test_should_map_close_long_to_sell_with_reduce_only(self) -> None
-⋮----
-def test_should_map_open_short_to_sell(self) -> None
-⋮----
-def test_should_map_close_short_to_buy_with_reduce_only(self) -> None
-⋮----
-def test_should_map_buy_alias_to_buy(self) -> None
-⋮----
-def test_should_map_sell_alias_to_sell_with_reduce_only(self) -> None
-⋮----
-def test_should_use_default_order_amount_when_missing(self) -> None
-⋮----
-def test_should_use_provided_amount(self) -> None
-⋮----
-def test_should_accept_quantity_as_amount_alias(self) -> None
-⋮----
-def test_should_default_to_market_order_type(self) -> None
-⋮----
-def test_should_accept_limit_order_with_price(self) -> None
-⋮----
-def test_should_accept_time_in_force_in_params(self) -> None
-⋮----
-class CcxtSignalExecutorMultiMarketTest(unittest.TestCase)
-⋮----
-def test_should_cache_exchanges_separately_and_set_correct_options(self) -> None
-⋮----
-executor = CcxtSignalExecutor(config)
-⋮----
-# We can mock the ccxt dependency or check _build_exchange output
-⋮----
-mock_spot = MagicMock()
-mock_future = MagicMock()
-⋮----
-# Set side effect to return spot or future based on the options defaultType passed to constructor
-def side_effect(config_dict)
-⋮----
-options = config_dict.get("options", {})
-default_type = options.get("defaultType")
-⋮----
-spot_ex = executor._get_exchange("SPOT")
-future_ex = executor._get_exchange("FUTURE")
-⋮----
-# Ensure calling it again returns the cached instances
-⋮----
-def test_backward_compatibility_with_mock_exchange(self) -> None
-⋮----
-mock_ex = "my-mocked-exchange"
-⋮----
-# When _exchange property is directly injected, _get_exchange should fall back to it
-</file>
-
 <file path="tests/test_execution_events.py">
 """
 Tests for Phase 3 (EVT-11-14) execution event transport and state management.
@@ -1726,39 +1603,6 @@ stored_events = await local_store.get_events_for_signal(signal_id, from_sequence
 signal_id = "sig-page-001"
 </file>
 
-<file path=".env.example">
-# Required system auth
-SYSTEM_WS_TOKEN=ws_b8f94450257d4e0aa3bafd2361a06b9a
-
-# Bot context
-BOT_ID=bot_355fc2aa10f04cd5958154a16b91daea
-
-# Connectivity
-SYSTEM_WS_URL=ws://171.244.195.150:8081/ws/executor
-
-# Exchange execution settings
-EXCHANGE_ID=binance
-EXCHANGE_API_KEY=
-EXCHANGE_API_SECRET=
-EXCHANGE_API_PASSPHRASE=
-EXCHANGE_SANDBOX=true
-EXCHANGE_DEFAULT_TYPE=
-DEFAULT_ORDER_AMOUNT=0.001
-DEFAULT_ORDER_TYPE=market
-EXECUTION_MODE=dry-run
-
-# Runtime tuning
-HEARTBEAT_INTERVAL_SECONDS=15
-HEARTBEAT_TIMEOUT_SECONDS=10
-HEARTBEAT_STALE_SECONDS=45
-RECONNECT_INITIAL_DELAY_SECONDS=1
-RECONNECT_MAX_DELAY_SECONDS=30
-PROTOCOL_VERSION=1.0
-HANDSHAKE_ACK_REQUIRED=true
-HANDSHAKE_ACK_TIMEOUT_SECONDS=5
-LOG_LEVEL=INFO
-</file>
-
 <file path="README.md">
 # Marcus Local Executor Client
 
@@ -1931,275 +1775,6 @@ Set `EXECUTION_MODE` to `dry-run` for safe logging, or `live` to place orders vi
 - WebSocket contract fixtures live in `tests/fixtures/contracts`.
 - Compatibility checks live in `tests/test_contract_compatibility.py`.
 - Signal validation tests live in `tests/test_engine.py` (SignalSchemaValidationTest and CcxtSignalExecutorBuildOrderTest)
-</file>
-
-<file path="src/local_executor/config.py">
-@dataclass(slots=True)
-class ExecutorConfig
-⋮----
-ws_url: str
-ws_token: str
-bot_id: str
-exchange_id: str
-exchange_api_key: str
-exchange_api_secret: str
-exchange_api_passphrase: str | None = None
-exchange_sandbox: bool = True
-exchange_default_type: str | None = None
-default_order_amount: float = 0.0
-default_order_type: str = "market"
-execution_mode: str = "dry-run"
-heartbeat_interval_seconds: float = 15.0
-heartbeat_timeout_seconds: float = 10.0
-reconnect_initial_delay_seconds: float = 1.0
-reconnect_max_delay_seconds: float = 30.0
-protocol_version: str = "1.0"
-handshake_ack_required: bool = True
-handshake_ack_timeout_seconds: float = 5.0
-heartbeat_stale_seconds: float = 45.0
-dry_run_initial_balance: float = 10000.0
-balance_sync_interval_seconds: float = 60.0
-log_level: str = "INFO"
-⋮----
-@classmethod
-    def from_env(cls) -> "ExecutorConfig"
-⋮----
-ws_url = _required("SYSTEM_WS_URL")
-ws_token = _required("SYSTEM_WS_TOKEN")
-bot_id = _required("BOT_ID")
-execution_mode = os.getenv("EXECUTION_MODE", "dry-run").strip().lower() or "dry-run"
-⋮----
-exchange_id = _optional("EXCHANGE_ID") or "binance"
-exchange_api_key = _optional("EXCHANGE_API_KEY") or ""
-exchange_api_secret = _optional("EXCHANGE_API_SECRET") or ""
-exchange_api_passphrase = _optional("EXCHANGE_API_PASSPHRASE")
-exchange_default_type = _optional("EXCHANGE_DEFAULT_TYPE")
-default_order_amount = _float("DEFAULT_ORDER_AMOUNT", 0.0)
-⋮----
-exchange_id = _required("EXCHANGE_ID")
-exchange_api_key = _required("EXCHANGE_API_KEY")
-exchange_api_secret = _required("EXCHANGE_API_SECRET")
-⋮----
-def _required(key: str) -> str
-⋮----
-value = os.getenv(key)
-⋮----
-def _float(key: str, default: float) -> float
-⋮----
-parsed = float(value)
-⋮----
-def _bool(key: str, default: bool) -> bool
-⋮----
-normalized = value.strip().lower()
-⋮----
-def _optional(key: str) -> str | None
-⋮----
-trimmed = value.strip()
-</file>
-
-<file path="src/local_executor/local_store.py">
-"""
-Local Execution State Store (EVT-12)
-
-Persistent local store for executor state using SQLite.
-
-Schema:
-- signals: track per-signal state (ACCEPTED, REJECTED, OPEN, CLOSED)
-- orders: track order state (PLACED, FILLED, FAILED, CANCELED)
-- positions: track position state (OPENED, UPDATING, CLOSED)
-- execution_events: append-only log of all received events
-- execution_acks: outbox pattern - ACKs pending delivery to backend
-- last_sync: track recovery state per signal
-
-Features:
-- Per-signal sequence validation
-- Idempotent event storage (event_id uniqueness)
-- Late event rejection (no events after position closed)
-- Outbox pattern for ACK delivery reliability
-- State machine enforcement
-"""
-⋮----
-@dataclass(slots=True)
-class SignalState
-⋮----
-"""Per-signal execution state."""
-signal_id: str
-signal_state: str  # ACCEPTED, REJECTED, OPEN, CLOSED
-order_state: str  # NONE, PLACED, FILLED, FAILED, CANCELED
-position_state: str  # NONE, OPENED, UPDATING, CLOSED
-last_sequence: int
-last_event_time: datetime | None
-closed_at: datetime | None
-created_at: datetime
-updated_at: datetime
-⋮----
-class LocalExecutionStore
-⋮----
-"""
-    SQLite-backed local execution state store.
-    
-    Thread-safe async wrapper around SQLite with:
-    - Per-signal state tracking
-    - Event deduplication
-    - Outbox pattern for ACK delivery
-    - Sequence validation and late event rejection
-    """
-⋮----
-async def initialize(self) -> None
-⋮----
-"""Create schema and initialize database."""
-⋮----
-async def close(self) -> None
-⋮----
-"""Close database connection."""
-⋮----
-def _create_schema(self) -> None
-⋮----
-"""Create SQLite schema."""
-cursor = self._conn.cursor()
-⋮----
-# Signals table: track per-signal state machine
-⋮----
-# Events table: append-only log
-⋮----
-# ACK outbox: pending ACK delivery
-⋮----
-# Recovery tracking
-⋮----
-# ============ Signal State Management ============
-⋮----
-async def get_or_create_signal(self, signal_id: str) -> SignalState
-⋮----
-"""Get signal state, creating if doesn't exist."""
-⋮----
-# Try to fetch existing
-⋮----
-row = cursor.fetchone()
-⋮----
-# Create new signal with ACCEPTED state
-now = datetime.utcnow().isoformat()
-⋮----
-async def get_signal_state(self, signal_id: str) -> SignalState | None
-⋮----
-"""Get current signal state."""
-⋮----
-async def is_position_closed(self, signal_id: str) -> bool
-⋮----
-"""Check if position is closed for signal."""
-state = await self.get_signal_state(signal_id)
-⋮----
-async def get_last_sequence(self, signal_id: str) -> int
-⋮----
-"""Get last processed sequence for signal."""
-⋮----
-async def get_active_signals(self) -> list[str]
-⋮----
-"""Discover signal_ids currently not closed to power automatic recovery bootstrapping."""
-⋮----
-"""Update signal state fields."""
-⋮----
-# Build dynamic UPDATE
-updates = ["updated_at = ?"]
-params: list[Any] = [now]
-⋮----
-sql = f"UPDATE execution_signals SET {', '.join(updates)} WHERE signal_id = ?"
-⋮----
-# ============ Event Storage ============
-⋮----
-async def store_event(self, event: ExecutionEvent) -> bool
-⋮----
-"""
-        Store execution event.
-        
-        Returns:
-            True if stored, False if already exists (duplicate)
-        """
-⋮----
-# Check if duplicate
-⋮----
-# Insert new event
-⋮----
-received_at = event.received_at.isoformat() if event.received_at else now
-⋮----
-async def event_exists(self, event_id: str) -> bool
-⋮----
-"""Return True if an event with `event_id` exists in the store."""
-⋮----
-"""Get events for signal in sequence order."""
-⋮----
-events = []
-⋮----
-# ============ ACK Outbox (Delivery Reliability) ============
-⋮----
-async def store_ack(self, ack: ExecutionACK) -> bool
-⋮----
-"""
-        Store ACK in outbox for delivery.
-        
-        Returns:
-            True if stored, False if already exists
-        """
-⋮----
-# Ensure received_at is not NULL to satisfy schema
-received_at_val = ack.received_at.isoformat() if ack.received_at else now
-⋮----
-async def get_pending_acks(self) -> list[ExecutionACK]
-⋮----
-"""Get ACKs pending delivery."""
-⋮----
-acks = []
-⋮----
-async def mark_ack_delivered(self, event_id: str) -> None
-⋮----
-"""Mark ACK as delivered."""
-⋮----
-async def increment_ack_delivery_attempts(self, event_id: str) -> None
-⋮----
-"""Increment delivery attempt counter for ACK."""
-⋮----
-# ============ Recovery Support ============
-⋮----
-async def set_recovery_state(self, signal_id: str, bootstrap_sequence: int) -> None
-⋮----
-"""Mark signal as recovered from bootstrap."""
-⋮----
-async def get_recovery_state(self, signal_id: str) -> int
-⋮----
-"""Get last bootstrap sequence for recovery."""
-⋮----
-# ============ Helper Methods ============
-⋮----
-def _row_to_signal_state(self, row: sqlite3.Row) -> SignalState
-⋮----
-"""Convert SQLite row to SignalState."""
-⋮----
-def _row_to_event(self, row: sqlite3.Row) -> ExecutionEvent
-⋮----
-"""Convert SQLite row to ExecutionEvent."""
-⋮----
-def _row_to_ack(self, row: sqlite3.Row) -> ExecutionACK
-⋮----
-"""Convert SQLite row to ExecutionACK."""
-⋮----
-error_code = None
-⋮----
-error_code = ACKErrorCode(row["error_code"])
-⋮----
-def _serialize_payload(payload: dict[str, Any]) -> str
-⋮----
-"""Serialize payload to JSON string."""
-⋮----
-def _deserialize_payload(payload_str: str) -> dict[str, Any]
-⋮----
-"""Deserialize payload from JSON string."""
-⋮----
-def _parse_datetime(value: str | None) -> datetime | None
-⋮----
-"""Parse ISO datetime string."""
-⋮----
-value = value.split("+")[0]
-⋮----
-value = value[:-1]
 </file>
 
 <file path="src/local_executor/recovery_manager.py">
@@ -2419,6 +1994,147 @@ async def _noop_resync(self, reason: str) -> None
 _ = reason
 </file>
 
+<file path="tests/test_engine.py">
+# pyright: reportMissingImports=false
+⋮----
+class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase)
+⋮----
+async def test_should_forward_signal_to_handler(self) -> None
+⋮----
+received: list[dict[str, Any]] = []
+⋮----
+async def on_signal(payload: dict[str, Any]) -> None
+⋮----
+config = ExecutorConfig(
+engine = LocalExecutorEngine(config=config, on_signal=on_signal)
+⋮----
+async def test_sweeper_invokes_cancel(self) -> None
+⋮----
+store = __import__("local_executor.local_store", fromlist=["LocalExecutionStore"]).LocalExecutionStore(":memory:")
+⋮----
+engine = LocalExecutorEngine(config=config, local_store=store)
+⋮----
+# Prepare a signal with past cancel deadline
+sid = "sig-sweeper-1"
+⋮----
+past = int(time.time()) - 10
+⋮----
+# Inject async mock cancel_order
+⋮----
+stop_event = asyncio.Event()
+task = asyncio.create_task(engine._deadline_sweeper_loop(stop_event), name="sweeper_test")
+⋮----
+# Let the sweeper run once (it waits 1s then checks)
+⋮----
+class SignalSchemaValidationTest(unittest.TestCase)
+⋮----
+def test_should_accept_minimal_valid_signal(self) -> None
+⋮----
+signal = {
+⋮----
+def test_should_reject_missing_signal_id(self) -> None
+⋮----
+def test_should_reject_empty_signal_id(self) -> None
+⋮----
+def test_should_reject_missing_action(self) -> None
+⋮----
+def test_should_reject_invalid_action(self) -> None
+⋮----
+def test_should_accept_valid_actions(self) -> None
+⋮----
+def test_should_reject_missing_symbol(self) -> None
+⋮----
+def test_should_accept_asset_pair_as_symbol_alias(self) -> None
+⋮----
+def test_should_accept_assetPair_as_symbol_alias(self) -> None
+⋮----
+def test_should_accept_market_order_type(self) -> None
+⋮----
+def test_should_accept_limit_order_type_with_price(self) -> None
+⋮----
+def test_should_reject_limit_order_type_without_price(self) -> None
+⋮----
+def test_should_reject_invalid_order_type(self) -> None
+⋮----
+def test_should_accept_amount_as_quantity(self) -> None
+⋮----
+def test_should_accept_amount_as_size(self) -> None
+⋮----
+def test_should_reject_negative_amount(self) -> None
+⋮----
+def test_should_reject_zero_amount(self) -> None
+⋮----
+def test_should_reject_non_numeric_amount(self) -> None
+⋮----
+def test_should_reject_non_dictionary_payload(self) -> None
+⋮----
+def test_should_accept_optional_fields(self) -> None
+⋮----
+class CcxtSignalExecutorBuildOrderTest(unittest.TestCase)
+⋮----
+def setUp(self) -> None
+⋮----
+def test_should_normalize_symbol_to_ccxt_format(self) -> None
+⋮----
+order = self.executor._build_order(signal)
+⋮----
+def test_should_handle_already_normalized_symbol(self) -> None
+⋮----
+def test_should_use_asset_pair_as_symbol(self) -> None
+⋮----
+def test_should_map_open_long_to_buy(self) -> None
+⋮----
+def test_should_map_close_long_to_sell_with_reduce_only(self) -> None
+⋮----
+def test_should_map_open_short_to_sell(self) -> None
+⋮----
+def test_should_map_close_short_to_buy_with_reduce_only(self) -> None
+⋮----
+def test_should_map_buy_alias_to_buy(self) -> None
+⋮----
+def test_should_map_sell_alias_to_sell_with_reduce_only(self) -> None
+⋮----
+def test_should_use_default_order_amount_when_missing(self) -> None
+⋮----
+def test_should_use_provided_amount(self) -> None
+⋮----
+def test_should_accept_quantity_as_amount_alias(self) -> None
+⋮----
+def test_should_default_to_market_order_type(self) -> None
+⋮----
+def test_should_accept_limit_order_with_price(self) -> None
+⋮----
+def test_should_accept_time_in_force_in_params(self) -> None
+⋮----
+class CcxtSignalExecutorMultiMarketTest(unittest.TestCase)
+⋮----
+def test_should_cache_exchanges_separately_and_set_correct_options(self) -> None
+⋮----
+executor = CcxtSignalExecutor(config)
+⋮----
+# We can mock the ccxt dependency or check _build_exchange output
+⋮----
+mock_spot = MagicMock()
+mock_future = MagicMock()
+⋮----
+# Set side effect to return spot or future based on the options defaultType passed to constructor
+def side_effect(config_dict)
+⋮----
+options = config_dict.get("options", {})
+default_type = options.get("defaultType")
+⋮----
+spot_ex = executor._get_exchange("SPOT")
+future_ex = executor._get_exchange("FUTURE")
+⋮----
+# Ensure calling it again returns the cached instances
+⋮----
+def test_backward_compatibility_with_mock_exchange(self) -> None
+⋮----
+mock_ex = "my-mocked-exchange"
+⋮----
+# When _exchange property is directly injected, _get_exchange should fall back to it
+</file>
+
 <file path="tests/test_ws_client.py">
 # pyright: reportMissingImports=false
 ⋮----
@@ -2500,6 +2216,323 @@ async def test_should_filter_unsupported_message_types(self) -> None
 socket = _FakeWebSocket(
 </file>
 
+<file path=".env.example">
+# Required system auth
+SYSTEM_WS_TOKEN=ws_b8f94450257d4e0aa3bafd2361a06b9a
+
+# Bot context
+BOT_ID=bot_355fc2aa10f04cd5958154a16b91daea
+
+# Connectivity
+SYSTEM_WS_URL=ws://171.244.195.150:8081/ws/executor
+
+# Exchange execution settings
+EXCHANGE_ID=binance
+EXCHANGE_API_KEY=
+EXCHANGE_API_SECRET=
+EXCHANGE_API_PASSPHRASE=
+EXCHANGE_SANDBOX=true
+EXCHANGE_DEFAULT_TYPE=
+DEFAULT_ORDER_AMOUNT=0.001
+DEFAULT_ORDER_TYPE=market
+EXECUTION_MODE=dry-run
+
+# Runtime tuning
+HEARTBEAT_INTERVAL_SECONDS=15
+HEARTBEAT_TIMEOUT_SECONDS=10
+HEARTBEAT_STALE_SECONDS=45
+RECONNECT_INITIAL_DELAY_SECONDS=1
+RECONNECT_MAX_DELAY_SECONDS=30
+PROTOCOL_VERSION=1.0
+HANDSHAKE_ACK_REQUIRED=true
+HANDSHAKE_ACK_TIMEOUT_SECONDS=5
+LOG_LEVEL=INFO
+</file>
+
+<file path="src/local_executor/config.py">
+@dataclass(slots=True)
+class ExecutorConfig
+⋮----
+ws_url: str
+ws_token: str
+bot_id: str
+exchange_id: str
+exchange_api_key: str
+exchange_api_secret: str
+exchange_api_passphrase: str | None = None
+exchange_sandbox: bool = True
+exchange_default_type: str | None = None
+default_order_amount: float = 0.0
+default_order_type: str = "market"
+execution_mode: str = "dry-run"
+heartbeat_interval_seconds: float = 15.0
+heartbeat_timeout_seconds: float = 10.0
+reconnect_initial_delay_seconds: float = 1.0
+reconnect_max_delay_seconds: float = 30.0
+protocol_version: str = "1.0"
+handshake_ack_required: bool = True
+handshake_ack_timeout_seconds: float = 5.0
+heartbeat_stale_seconds: float = 45.0
+dry_run_initial_balance: float = 10000.0
+balance_sync_interval_seconds: float = 60.0
+log_level: str = "INFO"
+⋮----
+@classmethod
+    def from_env(cls) -> "ExecutorConfig"
+⋮----
+ws_url = _required("SYSTEM_WS_URL")
+ws_token = _required("SYSTEM_WS_TOKEN")
+bot_id = _required("BOT_ID")
+execution_mode = os.getenv("EXECUTION_MODE", "dry-run").strip().lower() or "dry-run"
+⋮----
+exchange_id = _optional("EXCHANGE_ID") or "binance"
+exchange_api_key = _optional("EXCHANGE_API_KEY") or ""
+exchange_api_secret = _optional("EXCHANGE_API_SECRET") or ""
+exchange_api_passphrase = _optional("EXCHANGE_API_PASSPHRASE")
+exchange_default_type = _optional("EXCHANGE_DEFAULT_TYPE")
+default_order_amount = _float("DEFAULT_ORDER_AMOUNT", 0.0)
+⋮----
+exchange_id = _required("EXCHANGE_ID")
+exchange_api_key = _required("EXCHANGE_API_KEY")
+exchange_api_secret = _required("EXCHANGE_API_SECRET")
+⋮----
+def _required(key: str) -> str
+⋮----
+value = os.getenv(key)
+⋮----
+def _float(key: str, default: float) -> float
+⋮----
+parsed = float(value)
+⋮----
+def _bool(key: str, default: bool) -> bool
+⋮----
+normalized = value.strip().lower()
+⋮----
+def _optional(key: str) -> str | None
+⋮----
+trimmed = value.strip()
+</file>
+
+<file path="src/local_executor/local_store.py">
+"""
+Local Execution State Store (EVT-12)
+
+Persistent local store for executor state using SQLite.
+
+Schema:
+- signals: track per-signal state (ACCEPTED, REJECTED, OPEN, CLOSED)
+- orders: track order state (PLACED, FILLED, FAILED, CANCELED)
+- positions: track position state (OPENED, UPDATING, CLOSED)
+- execution_events: append-only log of all received events
+- execution_acks: outbox pattern - ACKs pending delivery to backend
+- last_sync: track recovery state per signal
+
+Features:
+- Per-signal sequence validation
+- Idempotent event storage (event_id uniqueness)
+- Late event rejection (no events after position closed)
+- Outbox pattern for ACK delivery reliability
+- State machine enforcement
+"""
+⋮----
+@dataclass(slots=True)
+class SignalState
+⋮----
+"""Per-signal execution state."""
+signal_id: str
+signal_state: str  # ACCEPTED, REJECTED, OPEN, CLOSED
+order_state: str  # NONE, PLACED, FILLED, FAILED, CANCELED
+position_state: str  # NONE, OPENED, UPDATING, CLOSED
+last_sequence: int
+last_event_time: datetime | None
+closed_at: datetime | None
+created_at: datetime
+updated_at: datetime
+policies: dict[str, Any] | None = None
+order_id: str | None = None
+order_symbol: str | None = None
+⋮----
+class LocalExecutionStore
+⋮----
+"""
+    SQLite-backed local execution state store.
+    
+    Thread-safe async wrapper around SQLite with:
+    - Per-signal state tracking
+    - Event deduplication
+    - Outbox pattern for ACK delivery
+    - Sequence validation and late event rejection
+    """
+⋮----
+async def initialize(self) -> None
+⋮----
+"""Create schema and initialize database."""
+⋮----
+async def close(self) -> None
+⋮----
+"""Close database connection."""
+⋮----
+def _create_schema(self) -> None
+⋮----
+"""Create SQLite schema."""
+cursor = self._conn.cursor()
+⋮----
+# Signals table: track per-signal state machine
+⋮----
+# Events table: append-only log
+⋮----
+# ACK outbox: pending ACK delivery
+⋮----
+# Recovery tracking
+⋮----
+# ============ Signal State Management ============
+⋮----
+async def get_or_create_signal(self, signal_id: str) -> SignalState
+⋮----
+"""Get signal state, creating if doesn't exist."""
+⋮----
+# Try to fetch existing
+⋮----
+row = cursor.fetchone()
+⋮----
+# Create new signal with ACCEPTED state
+now = datetime.utcnow().isoformat()
+⋮----
+async def get_signal_state(self, signal_id: str) -> SignalState | None
+⋮----
+"""Get current signal state."""
+⋮----
+async def is_position_closed(self, signal_id: str) -> bool
+⋮----
+"""Check if position is closed for signal."""
+state = await self.get_signal_state(signal_id)
+⋮----
+async def get_last_sequence(self, signal_id: str) -> int
+⋮----
+"""Get last processed sequence for signal."""
+⋮----
+async def get_active_signals(self) -> list[str]
+⋮----
+"""Discover signal_ids currently not closed to power automatic recovery bootstrapping."""
+⋮----
+async def append_sweeper_event(self, signal_id: str, action: str, reason: str) -> None
+⋮----
+"""Insert a synthetic event generated by the sweeper to the execution_events log."""
+⋮----
+# Sequence: use last_sequence + 1
+⋮----
+last_seq = row[0] if row else 0
+seq = (last_seq or 0) + 1
+payload = {"sweeper_action": action, "reason": reason}
+⋮----
+# Update last_sequence
+⋮----
+"""Update signal state fields."""
+⋮----
+# Build dynamic UPDATE
+updates = ["updated_at = ?"]
+params: list[Any] = [now]
+⋮----
+sql = f"UPDATE execution_signals SET {', '.join(updates)} WHERE signal_id = ?"
+⋮----
+# ============ Event Storage ============
+⋮----
+async def store_event(self, event: ExecutionEvent) -> bool
+⋮----
+"""
+        Store execution event.
+        
+        Returns:
+            True if stored, False if already exists (duplicate)
+        """
+⋮----
+# Check if duplicate
+⋮----
+# Insert new event
+⋮----
+received_at = event.received_at.isoformat() if event.received_at else now
+⋮----
+async def event_exists(self, event_id: str) -> bool
+⋮----
+"""Return True if an event with `event_id` exists in the store."""
+⋮----
+"""Get events for signal in sequence order."""
+⋮----
+events = []
+⋮----
+# ============ ACK Outbox (Delivery Reliability) ============
+⋮----
+async def store_ack(self, ack: ExecutionACK) -> bool
+⋮----
+"""
+        Store ACK in outbox for delivery.
+        
+        Returns:
+            True if stored, False if already exists
+        """
+⋮----
+# Ensure received_at is not NULL to satisfy schema
+received_at_val = ack.received_at.isoformat() if ack.received_at else now
+⋮----
+async def get_pending_acks(self) -> list[ExecutionACK]
+⋮----
+"""Get ACKs pending delivery."""
+⋮----
+acks = []
+⋮----
+async def mark_ack_delivered(self, event_id: str) -> None
+⋮----
+"""Mark ACK as delivered."""
+⋮----
+async def increment_ack_delivery_attempts(self, event_id: str) -> None
+⋮----
+"""Increment delivery attempt counter for ACK."""
+⋮----
+# ============ Recovery Support ============
+⋮----
+async def set_recovery_state(self, signal_id: str, bootstrap_sequence: int) -> None
+⋮----
+"""Mark signal as recovered from bootstrap."""
+⋮----
+async def get_recovery_state(self, signal_id: str) -> int
+⋮----
+"""Get last bootstrap sequence for recovery."""
+⋮----
+# ============ Helper Methods ============
+⋮----
+def _row_to_signal_state(self, row: sqlite3.Row) -> SignalState
+⋮----
+"""Convert SQLite row to SignalState."""
+⋮----
+def _row_to_event(self, row: sqlite3.Row) -> ExecutionEvent
+⋮----
+"""Convert SQLite row to ExecutionEvent."""
+⋮----
+def _row_to_ack(self, row: sqlite3.Row) -> ExecutionACK
+⋮----
+"""Convert SQLite row to ExecutionACK."""
+⋮----
+error_code = None
+⋮----
+error_code = ACKErrorCode(row["error_code"])
+⋮----
+def _serialize_payload(payload: dict[str, Any]) -> str
+⋮----
+"""Serialize payload to JSON string."""
+⋮----
+def _deserialize_payload(payload_str: str) -> dict[str, Any]
+⋮----
+"""Deserialize payload from JSON string."""
+⋮----
+def _parse_datetime(value: str | None) -> datetime | None
+⋮----
+"""Parse ISO datetime string."""
+⋮----
+value = value.split("+")[0]
+⋮----
+value = value[:-1]
+</file>
+
 <file path="src/local_executor/engine.py">
 SignalHandler = Callable[[dict[str, Any]], Awaitable[None]]
 ⋮----
@@ -2555,7 +2588,35 @@ symbol = payload.get("symbol", "unknown")
 ⋮----
 # Mark as OPEN — downstream execution events will close it
 ⋮----
+# Persist order id / symbol when present
+order_symbol = None
+⋮----
+built = self._executor._build_order(payload)
+order_symbol = built.get("symbol")
+⋮----
 # Record the signal but mark as REJECTED so dedup still protects
+⋮----
+async def _deadline_sweeper_loop(self, stop_event: asyncio.Event) -> None
+⋮----
+"""Periodic sweeper that enforces cancel/close deadlines recorded in signal policies."""
+interval = 5.0
+⋮----
+# Wait briefly before starting
+⋮----
+active = await self._local_store.get_active_signals()
+now_epoch = int(__import__("time").time())
+⋮----
+state = await self._local_store.get_signal_state(sid)
+⋮----
+policies = state.policies
+# Support both camelCase and snake_case keys
+cancel_ts = policies.get("cancelOrderAfter") or policies.get("cancel_order_after")
+close_ts = policies.get("closePositionAfter") or policies.get("close_position_after")
+⋮----
+# Cancel outstanding orders: attempt exchange-level cancel then append sweeper event
+⋮----
+# Force-close position locally and append sweeper event
+# Only act if position is not already CLOSED
 ⋮----
 async def _on_resync(self, reason: str) -> None
 ⋮----
@@ -2726,6 +2787,29 @@ action = str(payload.get("action", "")).strip().upper()
 ⋮----
 order = self._build_order(payload)
 ⋮----
+# 4.5 Pre-flight sizing cap: enforce policies.maxSizePercent if provided
+policies = payload.get("policies") or {}
+maxp = None
+⋮----
+maxp = policies.get("maxSizePercent") if policies.get("maxSizePercent") is not None else policies.get("max_size_percent")
+⋮----
+maxp = float(maxp)
+# allow 0-100 percent as convenience (convert to 0-1)
+⋮----
+maxp = maxp / 100.0
+⋮----
+# We need price to compute notional. If price absent, we log and skip cap.
+price = order.get("price")
+⋮----
+bal = self._fetch_balance_sync(payload.get("market_type"))
+available = float(bal.get("free", bal.get("total", 0.0)))
+cap_notional = maxp * available
+requested_amount = float(order.get("amount"))
+requested_notional = requested_amount * float(price)
+⋮----
+new_amount = cap_notional / float(price)
+# enforce minimal precision
+⋮----
 # 5. Dry-run short-circuit
 ⋮----
 # 6. Live execution — Futures lifecycle + create_order
@@ -2821,6 +2905,27 @@ options: dict[str, Any] = {}
 # Configure defaultType based on market_type
 ⋮----
 exchange = getattr(ccxt, exchange_id)(
+⋮----
+async def cancel_order(self, order_id: str | None, symbol: str | None = None, market_type: str | None = None) -> bool
+⋮----
+"""Async wrapper to cancel an order on the exchange. Returns True on success."""
+⋮----
+def _cancel_order_sync(self, order_id: str, symbol: str | None = None, market_type: str | None = None) -> bool
+⋮----
+ex = self._get_exchange(market_type)
+# CCXT signature: cancel_order(id, symbol=None, params={})
+⋮----
+async def force_close_position(self, symbol: str | None, market_type: str | None = None) -> bool
+⋮----
+"""Attempt to force-close a position for `symbol`. Best-effort; returns True if invoked."""
+⋮----
+def _force_close_sync(self, symbol: str, market_type: str | None = None) -> bool
+⋮----
+# Prefer a dedicated method if provided by exchange wrapper
+⋮----
+# As a fallback, try to place a market reduce-only order if supported
+⋮----
+# Best-effort: attempt a market order with reduceOnly param
 ⋮----
 # ── Symbol normalisation ───────────────────────────────────────────────
 ⋮----

@@ -80,6 +80,7 @@ class LocalExecutionStore:
             self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._create_schema()
+            self._migrate_schema()
             self._logger.info("Local store initialized db_path=%s", self._db_path)
 
     async def close(self) -> None:
@@ -161,6 +162,18 @@ class LocalExecutionStore:
                 FOREIGN KEY (signal_id) REFERENCES execution_signals(signal_id)
             )
         """)
+
+        self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add optional columns that may be missing from older SQLite files."""
+        cursor = self._conn.cursor()
+        cursor.execute("PRAGMA table_info(execution_signals)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        for column_name in ("policies", "order_id", "order_symbol"):
+            if column_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE execution_signals ADD COLUMN {column_name} TEXT")
 
         self._conn.commit()
 
@@ -522,6 +535,7 @@ class LocalExecutionStore:
 
     def _row_to_signal_state(self, row: sqlite3.Row) -> SignalState:
         """Convert SQLite row to SignalState."""
+        row_keys = set(row.keys())
         return SignalState(
             signal_id=row["signal_id"],
             signal_state=row["signal_state"],
@@ -532,9 +546,9 @@ class LocalExecutionStore:
             closed_at=_parse_datetime(row["closed_at"]),
             created_at=_parse_datetime(row["created_at"]),
             updated_at=_parse_datetime(row["updated_at"]),
-            policies=_deserialize_payload(row["policies"]) if row["policies"] else None,
-            order_id=row["order_id"] if "order_id" in row.keys() else None,
-            order_symbol=row["order_symbol"] if "order_symbol" in row.keys() else None,
+            policies=_deserialize_payload(row["policies"]) if "policies" in row_keys and row["policies"] else None,
+            order_id=row["order_id"] if "order_id" in row_keys else None,
+            order_symbol=row["order_symbol"] if "order_symbol" in row_keys else None,
         )
 
     def _row_to_event(self, row: sqlite3.Row) -> ExecutionEvent:

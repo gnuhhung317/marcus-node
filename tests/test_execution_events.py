@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 import asyncio
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -301,6 +302,58 @@ class TestLocalExecutionStore:
         assert state.signal_state == "OPEN"
         assert state.order_state == "PLACED"
         assert state.last_sequence == 1
+
+    @pytest.mark.asyncio
+    async def test_initialize_migrates_legacy_signal_schema(self, tmp_path):
+        """Test that older databases missing optional columns are upgraded on startup."""
+        db_path = tmp_path / "legacy_executor_state.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE execution_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL UNIQUE,
+                signal_state TEXT NOT NULL DEFAULT 'ACCEPTED',
+                order_state TEXT NOT NULL DEFAULT 'NONE',
+                position_state TEXT NOT NULL DEFAULT 'NONE',
+                last_sequence INTEGER NOT NULL DEFAULT 0,
+                last_event_time TEXT,
+                closed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            """
+            INSERT INTO execution_signals
+            (signal_id, signal_state, order_state, position_state, last_sequence, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("sig-legacy", "OPEN", "PLACED", "NONE", 0, now, now),
+        )
+        conn.commit()
+        conn.close()
+
+        store = LocalExecutionStore(db_path=db_path)
+        await store.initialize()
+
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(execution_signals)")}
+        conn.close()
+
+        assert {"policies", "order_id", "order_symbol"}.issubset(columns)
+
+        state = await store.get_signal_state("sig-legacy")
+        assert state is not None
+        assert state.signal_id == "sig-legacy"
+        assert state.signal_state == "OPEN"
+        assert state.order_id is None
+        assert state.order_symbol is None
+        assert state.policies is None
+
+        await store.close()
 
     @pytest.mark.asyncio
     async def test_is_position_closed(self, local_store):
