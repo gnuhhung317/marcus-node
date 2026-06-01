@@ -12,7 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from local_executor.config import ExecutorConfig
 from local_executor.engine import LocalExecutorEngine
-from local_executor.execution import SignalSchema, CcxtSignalExecutor
+from local_executor.execution import ExecutionResult, SignalSchema, CcxtSignalExecutor
+
+
+class _FakeNotifier:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> bool:
+        self.messages.append(message)
+        return True
 
 
 class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase):
@@ -79,6 +90,93 @@ class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase):
         await task
 
         engine._executor.cancel_order.assert_awaited()
+
+    async def test_should_notify_on_execution_error(self) -> None:
+        from unittest.mock import AsyncMock
+
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+        engine = LocalExecutorEngine(config=config)
+        fake_notifier = _FakeNotifier()
+        engine._notifier = fake_notifier
+        engine._executor.execute_signal = AsyncMock(
+            return_value=ExecutionResult(
+                mode="error",
+                order_id=None,
+                details={},
+                errors=["order rejected by exchange"],
+            )
+        )
+
+        await engine._default_signal_handler(
+            {
+                "signal_id": "sig-error",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+            }
+        )
+
+        self.assertEqual(len(fake_notifier.messages), 1)
+        self.assertIn("Execution error", fake_notifier.messages[0])
+        self.assertIn("sig-error", fake_notifier.messages[0])
+        self.assertIn("order rejected by exchange", fake_notifier.messages[0])
+
+    async def test_sweeper_notifies_for_forced_close(self) -> None:
+        from unittest.mock import AsyncMock
+
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+
+        store = __import__("local_executor.local_store", fromlist=["LocalExecutionStore"]).LocalExecutionStore(":memory:")
+        await store.initialize()
+
+        engine = LocalExecutorEngine(config=config, local_store=store)
+        fake_notifier = _FakeNotifier()
+        engine._notifier = fake_notifier
+
+        sid = "sig-sweeper-close"
+        await store.get_or_create_signal(sid)
+        import time
+        past = int(time.time()) - 10
+        await store.update_signal_state(
+            sid,
+            signal_state="OPEN",
+            position_state="OPENED",
+            policies={"closePositionAfter": past},
+            order_symbol="BTC/USDT",
+        )
+
+        engine._executor.force_close_position = AsyncMock(return_value=True)
+
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(engine._deadline_sweeper_loop(stop_event), name="sweeper_notify_test")
+
+        await asyncio.sleep(1.6)
+        stop_event.set()
+        await task
+
+        engine._executor.force_close_position.assert_awaited()
+        self.assertEqual(len(fake_notifier.messages), 1)
+        self.assertIn("Emergency forced-close sweep", fake_notifier.messages[0])
+        self.assertIn(sid, fake_notifier.messages[0])
 
 
 class SignalSchemaValidationTest(unittest.TestCase):

@@ -31,6 +31,7 @@ class ResilientWebSocketClient:
         on_audit_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_control: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_replay_response: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_connection_loss: Callable[[str], Awaitable[None]] | None = None,
         bot_id: str = "unknown-bot",
         protocol_version: str = "1.0",
         handshake_ack_required: bool = True,
@@ -53,6 +54,7 @@ class ResilientWebSocketClient:
         self._on_audit_push = on_audit_push or self._noop_async
         self._on_control = on_control or self._noop_async
         self._on_replay_response = on_replay_response or self._noop_async
+        self._on_connection_loss = on_connection_loss
         self._bot_id = bot_id
         self._protocol_version = protocol_version
         self._handshake_ack_required = handshake_ack_required
@@ -111,6 +113,10 @@ class ResilientWebSocketClient:
                     repr(exc),
                 )
                 self._logger.debug("Full exception details:", exc_info=exc)
+                if self._on_connection_loss is not None:
+                    await self._on_connection_loss(
+                        f"{exc.__class__.__name__}: {exc!r}"
+                    )
             finally:
                 self._websocket = None  # Clear websocket reference on disconnect
 

@@ -129,6 +129,7 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
     async def test_should_use_exponential_backoff_on_reconnect(self) -> None:
         stop_event = asyncio.Event()
         sleep_durations: list[float] = []
+        losses: list[str] = []
 
         async def fake_sleep(duration: float) -> None:
             sleep_durations.append(duration)
@@ -140,6 +141,9 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
 
         async def on_resync(reason: str) -> None:
             _ = reason
+
+        async def on_connection_loss(reason: str) -> None:
+            losses.append(reason)
 
         def failing_connect(*args, **kwargs):
             raise OSError("network down")
@@ -153,6 +157,7 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
             reconnect_max_delay_seconds=4,
             on_signal=on_signal,
             on_resync=on_resync,
+            on_connection_loss=on_connection_loss,
             connect_func=failing_connect,
             sleep_func=fake_sleep,
         )
@@ -160,6 +165,8 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
         await client.run(stop_event=stop_event)
 
         self.assertEqual(sleep_durations, [1, 2, 4])
+        self.assertEqual(len(losses), 3)
+        self.assertIn("OSError", losses[0])
 
     async def test_should_reconnect_when_handshake_ack_is_invalid(self) -> None:
         stop_event = asyncio.Event()
