@@ -381,7 +381,7 @@ class LocalExecutorEngine:
                     "type": "audit-push",
                     "botId": self._config.bot_id,
                     "payload": {
-                        "kind": "balance-snapshot",
+                        "kind": "balance_snapshot",
                         "total": bal["total"],
                         "free": bal["free"],
                         "used": bal["used"],

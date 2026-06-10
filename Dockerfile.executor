@@ -7,3 +7,5 @@ COPY src ./src
 COPY local_executor.py ./
 
 RUN pip install --no-cache-dir -e .
+
+CMD ["python", "local_executor.py"]
