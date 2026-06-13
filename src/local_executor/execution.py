@@ -212,7 +212,7 @@ class CcxtSignalExecutor:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    async def fetch_balance(self, market_type: str | None = None) -> dict[str, float]:
+    async def fetch_balance(self, market_type: str | None = None) -> dict[str, Any]:
         """Retrieve current account balance (thread-safe async wrapper)."""
         return await asyncio.to_thread(self._fetch_balance_sync, market_type)
 
@@ -705,14 +705,15 @@ class CcxtSignalExecutor:
             return "stop_loss"
         return None
 
-    def _fetch_balance_sync(self, market_type: str | None = None) -> dict[str, float]:
+    def _fetch_balance_sync(self, market_type: str | None = None) -> dict[str, Any]:
         if self._config.execution_mode == "dry-run":
             val = self._config.dry_run_initial_balance
-            return {"total": val, "free": val, "used": 0.0, "currency": "USDT"}
+            return {"total": val, "free": val, "used": 0.0, "currency": "USDT", "unrealizedPnl": 0.0}
 
         try:
             exchange = self._get_exchange(market_type)
             balance = exchange.fetch_balance()
+            unrealized_pnl = self._fetch_unrealized_pnl_sync(exchange)
 
             for curr in ("USDT", "USDC", "BUSD"):
                 if curr in balance and isinstance(balance[curr], dict):
@@ -722,6 +723,7 @@ class CcxtSignalExecutor:
                         "free": float(details.get("free", 0.0)),
                         "used": float(details.get("used", 0.0)),
                         "currency": curr,
+                        "unrealizedPnl": unrealized_pnl,
                     }
 
             if "total" in balance and isinstance(balance["total"], dict):
@@ -732,13 +734,38 @@ class CcxtSignalExecutor:
                             "free": float(balance.get("free", {}).get(curr, 0.0)),
                             "used": float(balance.get("used", {}).get(curr, 0.0)),
                             "currency": curr,
+                            "unrealizedPnl": unrealized_pnl,
                         }
 
-            return {"total": 0.0, "free": 0.0, "used": 0.0, "currency": "NONE"}
+            return {"total": 0.0, "free": 0.0, "used": 0.0, "currency": "NONE", "unrealizedPnl": unrealized_pnl}
 
         except Exception as exc:
             self._logger.error("Failed to fetch live balance: %s", exc)
             raise
+
+    def _fetch_unrealized_pnl_sync(self, exchange: Any) -> float:
+        try:
+            if not hasattr(exchange, "fetch_positions"):
+                return 0.0
+
+            positions = exchange.fetch_positions()
+            total = 0.0
+            for position in positions or []:
+                if not isinstance(position, dict):
+                    continue
+                raw_pnl = position.get("unrealizedPnl")
+                if raw_pnl is None:
+                    raw_pnl = position.get("unrealized_pnl")
+                if raw_pnl is None:
+                    info = position.get("info")
+                    if isinstance(info, dict):
+                        raw_pnl = info.get("unrealizedPnl") or info.get("unrealizedProfit")
+                if raw_pnl is not None:
+                    total += float(raw_pnl)
+            return total
+        except Exception as exc:
+            self._logger.debug("Unable to fetch unrealized pnl: %s", exc)
+            return 0.0
 
     # ── Exchange lifecycle ─────────────────────────────────────────────────
 

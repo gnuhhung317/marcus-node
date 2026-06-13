@@ -368,7 +368,7 @@ class LocalExecutorEngine:
 
     async def _balance_sync_loop(self, stop_event: asyncio.Event) -> None:
         """Periodically emits account equity to backend for dashboard views."""
-        interval = max(5.0, self._config.balance_sync_interval_seconds)
+        interval = max(3600.0, self._config.balance_sync_interval_seconds)
         self._logger.info("Balance sync loop started interval=%.1fs", interval)
 
         # Wait briefly to let the handshake settle on startup
@@ -386,7 +386,10 @@ class LocalExecutorEngine:
                         "free": bal["free"],
                         "used": bal["used"],
                         "currency": bal["currency"],
+                        "exchange": self._config.exchange_id,
+                        "unrealizedPnl": bal.get("unrealizedPnl", 0.0),
                         "mode": self._config.execution_mode,
+                        "executionMode": self._config.execution_mode,
                         "timestamp": self._ws_client._now_utc_iso(),
                     },
                 }
