@@ -162,6 +162,27 @@ local-executor
 python -m unittest discover -s tests -v
 ```
 
+## Remote Executor E2E
+Use the remote e2e runner to provision a bot/subscription, verify the signed
+executor WebSocket handshake, start the local executor, publish a signed signal,
+and assert local SQLite state.
+
+```bash
+cp .env.e2e.example .env.e2e.local
+# Fill EXCHANGE_API_KEY and EXCHANGE_API_SECRET in .env.e2e.local.
+python scripts/remote_executor_e2e.py --env-file .env.e2e.local
+```
+
+Defaults target:
+- HTTP API: `https://marcus-api.tromoi.xyz`
+- WebSocket: `ws://171.244.195.150:8081/ws/executor`
+
+The runner never writes exchange credentials to the provisioning state file.
+It defaults to a futures `OPEN_SHORT` signal because that is the shape the
+remote backend accepted during probe. It accepts `REJECTED` local signal state
+as a completed delivery path when the Binance sandbox rejects the credential
+or order, and prints the executor error for diagnosis.
+
 ## Execution Mode
 Set `EXECUTION_MODE` to `dry-run` for safe logging, or `live` to place orders via CCXT.
 

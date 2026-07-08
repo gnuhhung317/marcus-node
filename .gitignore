@@ -1,1 +1,9 @@
 __pycache__/
+.env
+.env.*
+!.env.example
+!.env.e2e.example
+scripts/.e2e*_state.json
+scripts/.e2e*.db
+scripts/e2e-output/
+*.db

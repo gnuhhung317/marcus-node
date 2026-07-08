@@ -28,14 +28,13 @@ import requests
 
 
 COMMON_REGISTER_PATHS = [
-    # "/auth/register",
-    # "/api/auth/register",
+    "/auth/register",
+    # Keep the versioned path as a fallback for deployments that mount the API under /api/v1.
     "/api/v1/auth/register",
 ]
 
 COMMON_LOGIN_PATHS = [
-    # "/auth/login",
-    # "/api/auth/login",
+    "/auth/login",
     "/api/v1/auth/login",
 ]
 
@@ -88,7 +87,7 @@ def fetch_existing_subscription(base: str, trader_token: str, bot_id: str) -> di
     for p in candidates:
         url = base.rstrip("/") + p
         try:
-            r = requests.get(url, headers=headers, timeout=10)
+            r = requests.get(url, headers=headers, timeout=20)
             txt_preview = (r.text or "")[:800].replace("\n", " ")
             print(f"GET {p} => {r.status_code} {txt_preview}")
             if r.status_code != 200:
@@ -110,7 +109,7 @@ def try_post(base: str, paths: list[str], json_body: dict, headers: dict | None 
     for p in paths:
         url = base.rstrip("/") + p
         try:
-            r = requests.post(url, json=json_body, headers=headers, timeout=10)
+            r = requests.post(url, json=json_body, headers=headers, timeout=20)
             # verbose logging for diagnostics
             try:
                 body_preview = json.dumps(json_body, ensure_ascii=False)
@@ -134,6 +133,14 @@ def load_state(state_file: Path) -> dict:
         except Exception:
             return {}
     return {}
+
+
+def _state_identity_matches(state: dict, base: str, dev_email: str, trader_email: str) -> bool:
+    return (
+        state.get("base_url") == base
+        and state.get("dev_email") == dev_email
+        and state.get("trader_email") == trader_email
+    )
 
 
 def save_state(state_file: Path, state: dict) -> None:
@@ -195,14 +202,14 @@ def create_bot(base: str, dev_token: str, bot_name: str = "e2e-bot", bot_id: str
         "description": "End-to-end test bot",
     }
     candidates = [
-        "/api/v1/bots/register",
+        "/api/v1/bots",
         "/api/bots",
         "/bots",
     ]
     for p in candidates:
         url = base.rstrip("/") + p
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=10)
+            r = requests.post(url, json=payload, headers=headers, timeout=20)
             # log response for debugging payload/permission issues
             try:
                 payload_preview = json.dumps(payload, ensure_ascii=False)
@@ -221,7 +228,7 @@ def create_bot(base: str, dev_token: str, bot_name: str = "e2e-bot", bot_id: str
                 # try listing bots as fallback
                 try:
                     list_url = base.rstrip("/") + p
-                    lr = requests.get(list_url, headers=headers, timeout=10)
+                    lr = requests.get(list_url, headers=headers, timeout=20)
                     lr_preview = (lr.text or "")[:400].replace("\n", " ")
                     print(f"GET {p} => {lr.status_code} {lr_preview}")
                     if lr.status_code == 200:
@@ -247,10 +254,10 @@ def create_bot(base: str, dev_token: str, bot_name: str = "e2e-bot", bot_id: str
     raise RuntimeError("Unable to create or find a bot (403 or not found)")
 
 
-def subscribe_bot(base: str, trader_token: str, bot_id: str):
+def subscribe_bot(base: str, trader_token: str, bot_id: str, trader_id: str | None = None):
     url = base.rstrip("/") + f"/api/v1/subscriptions/{bot_id}"
     headers = {"Authorization": f"Bearer {trader_token}"}
-    r = requests.post(url, headers=headers, timeout=10)
+    r = requests.post(url, headers=headers, timeout=20)
     txt_preview = (r.text or "")[:800].replace("\n", " ")
     print(f"POST /api/v1/subscriptions/{bot_id} => {r.status_code} {txt_preview}")
 
@@ -266,14 +273,16 @@ def subscribe_bot(base: str, trader_token: str, bot_id: str):
         print("Attempting routing upsert fallback to create subscriber mapping...")
         try:
             upsert_paths = ["/api/v1/routing/subscribers", "/routing/subscribers"]
-            payload = {"botId": bot_id, "userId": state.get("trader_id")}
+            payload = {"botId": bot_id}
+            if trader_id:
+                payload["userId"] = trader_id
             # try with trader token header first, then unauthenticated
             heads = [{"Authorization": f"Bearer {trader_token}"}, {}]
             for h in heads:
                 for p in upsert_paths:
                     try:
                         ru = base.rstrip("/") + p
-                        ru_r = requests.post(ru, json=payload, headers=h or None, timeout=10)
+                        ru_r = requests.post(ru, json=payload, headers=h or None, timeout=20)
                         ru_preview = str(ru_r.text)[:200].replace("\n", " ")
                         print(f"POST {p} => {ru_r.status_code} {ru_preview}")
                         if ru_r.status_code in (200, 201, 204):
@@ -311,9 +320,9 @@ def build_handshake(bot_id: str, ws_token: str, protocol_version: str = "1.0") -
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://marcus-api.tromoi.xyz", required=False, help="HTTP base URL, e.g. http://localhost:8081 or https://marcus-api.tromoi.xyz")
-    parser.add_argument("--dev-email", default="dev+e2e1@example.com")
+    parser.add_argument("--dev-email", default="demo-dev@gmail.com")
     parser.add_argument("--dev-password", default="Password123!")
-    parser.add_argument("--trader-email", default="trader+e2e@example.com")
+    parser.add_argument("--trader-email", default="demo-trader@gmail.com")
     parser.add_argument("--trader-password", default="Password123!")
     parser.add_argument("--bot-name", default="e2e-bot")
     parser.add_argument("--ws-path", default="/ws/executor/events")
@@ -326,7 +335,7 @@ def main():
     state_file = Path(args.state_file)
     state = load_state(state_file) if args.reuse_state else {}
 
-    if state.get("base_url") != base:
+    if state and not _state_identity_matches(state, base, args.dev_email, args.trader_email):
         state = {}
 
     if not state.get("dev_token"):
@@ -343,18 +352,23 @@ def main():
         print("Dev token obtained?", bool(dev_token))
         if dev_token:
             print("Dev token (truncated):", (dev_token[:40] + '...') if len(dev_token) > 60 else dev_token)
+            state["dev_email"] = args.dev_email
+            state["dev_token"] = dev_token
+            state["base_url"] = base
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            save_state(state_file, state)
+            print("Saved developer auth state to:", state_file)
             # probe common bot listing endpoints using the dev token to debug permissions
             bot_list_paths = ["/api/v1/bots/register", "/api/bots", "/bots"]
             headers = {"Authorization": f"Bearer {dev_token}"}
             for p in bot_list_paths:
                 try:
                     url = base.rstrip("/") + p
-                    lr = requests.get(url, headers=headers, timeout=10)
+                    lr = requests.get(url, headers=headers, timeout=20)
                     txt = lr.text[:400].replace('\n',' ')
                     print(f"GET {p} => {lr.status_code} {txt}")
                 except Exception as e:
                     print(f"GET {p} => error {e}")
-        state["dev_token"] = dev_token
     else:
         dev_token = state["dev_token"]
         print("Reusing saved developer token.")
@@ -375,6 +389,8 @@ def main():
             state["bot_signer_secret"] = bot_signer_secret
         state["bot_id"] = bot_id
         state["base_url"] = base
+        state["dev_email"] = args.dev_email
+        state["trader_email"] = args.trader_email
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_state(state_file, state)
         print("Saved bot provisioning state to:", state_file)
@@ -396,7 +412,12 @@ def main():
             state["trader_id"] = trader_id
             print("Captured trader id:", trader_id)
         print("Trader token obtained?", bool(trader_token))
+        state["trader_email"] = args.trader_email
         state["trader_token"] = trader_token
+        state["base_url"] = base
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(state_file, state)
+        print("Saved trader auth state to:", state_file)
     else:
         print("Reusing saved trader token.")
         trader_id = state.get("trader_id")
@@ -404,7 +425,7 @@ def main():
     ws_token = state.get("ws_token")
     if not ws_token:
         print("Subscribing trader to bot to obtain ws_token...")
-        sub = subscribe_bot(base, trader_token, bot_id)
+        sub = subscribe_bot(base, trader_token, bot_id, trader_id=trader_id)
         ws_token = _extract_ws_token(sub, bot_id=bot_id)
         if not ws_token:
             print("Subscription response missing ws_token; querying existing subscriptions...")
@@ -420,6 +441,8 @@ def main():
 
     state["base_url"] = base
     state["bot_id"] = bot_id
+    state["dev_email"] = args.dev_email
+    state["trader_email"] = args.trader_email
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state_file, state)
     print("Saved provisioning state to:", state_file)
