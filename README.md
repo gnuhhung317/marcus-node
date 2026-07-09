@@ -183,6 +183,24 @@ remote backend accepted during probe. It accepts `REJECTED` local signal state
 as a completed delivery path when the Binance sandbox rejects the credential
 or order, and prints the executor error for diagnosis.
 
+## Append-Only Binance Replay
+Use the append-only replay runner when you want to read fresh Binance data and
+seed only new trade lifecycle events and portfolio snapshots for the demo
+trader without rebuilding existing history.
+
+```bash
+python scripts/append_binance_replay.py --yes --trader-email demo-trader@gmail.com
+```
+
+Required environment variables:
+- `EXCHANGE_API_KEY`
+- `EXCHANGE_API_SECRET`
+
+Optional overrides:
+- `EXCHANGE_ID` for non-Binance CCXT exchanges
+- `EXCHANGE_SANDBOX=true` for sandbox/demo mode
+- `APPEND_BOOTSTRAP_DAYS` and `APPEND_OVERLAP_DAYS` for trade lookback tuning
+
 ## Execution Mode
 Set `EXECUTION_MODE` to `dry-run` for safe logging, or `live` to place orders via CCXT.
 
