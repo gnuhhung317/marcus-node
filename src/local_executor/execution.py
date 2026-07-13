@@ -1461,12 +1461,14 @@ class CcxtSignalExecutor:
         
         if market_type == "FUTURE":
             pos_size = 0.0
+            position_observed = False
             try:
                 # Lấy toàn bộ vị thế hiện tại của symbol này trên sàn
                 if hasattr(exchange, "fetch_positions"):
                     positions = exchange.fetch_positions([symbol])
+                    position_observed = True
                     for pos in positions:
-                        if pos.get("symbol") == symbol:
+                        if self._position_symbol_matches(symbol, pos):
                             pos_size = abs(float(pos.get("contracts") or pos.get("size") or 0.0))
                             break
             except Exception as e:
@@ -1503,13 +1505,14 @@ class CcxtSignalExecutor:
                         {"position_size": pos_size, "symbol": symbol}
                     ))
             # Kịch bản B: Sàn không có vị thế mở (vị thế đã đóng hoặc chưa mở)
-            else:
+            elif position_observed:
                 # Nếu cục bộ đang hiểu là vị thế đang mở -> Đồng bộ đóng vị thế
                 if position_state in ("OPENED", "UPDATING"):
+                    close_payload = self._build_position_closed_payload(exchange, symbol, state)
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.POSITION_CLOSED,
-                        {"symbol": symbol}
+                        close_payload
                     ))
                 # Nếu cục bộ hiểu là NONE nhưng thực tế lệnh đã khớp trên sàn
                 # (nghĩa là vị thế đã được mở và đóng/hủy xong xuôi trước khi khôi phục)
@@ -1534,10 +1537,11 @@ class CcxtSignalExecutor:
                             ExecutionEventType.POSITION_OPENED,
                             {"symbol": symbol}
                         ))
+                        close_payload = self._build_position_closed_payload(exchange, symbol, state)
                         events.append(self._create_synthetic_event(
                             signal_id,
                             ExecutionEventType.POSITION_CLOSED,
-                            {"symbol": symbol}
+                            close_payload
                         ))
         
         # 5. Đối chiếu trạng thái cho tài khoản SPOT
@@ -1560,6 +1564,101 @@ class CcxtSignalExecutor:
 
     # ── Symbol normalisation ───────────────────────────────────────────────
 
+    def _build_position_closed_payload(self, exchange: Any, symbol: str, state: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {"symbol": symbol}
+        realized_pnl = 0.0
+        has_realized_pnl = False
+        exit_price: float | None = None
+        position_size: float | None = None
+
+        trades = self._fetch_recent_my_trades(exchange, symbol, state)
+        close_trade = None
+        for trade in trades:
+            trade_pnl = self._extract_realized_pnl(trade)
+            if trade_pnl is None:
+                continue
+            realized_pnl += trade_pnl
+            has_realized_pnl = True
+            close_trade = trade
+
+        if close_trade is None and trades:
+            close_trade = trades[-1]
+
+        if close_trade is not None:
+            exit_price = self._extract_trade_float(close_trade, "price", "average")
+            position_size = self._extract_trade_float(close_trade, "amount", "qty", "quantity")
+
+        if has_realized_pnl:
+            payload["pnl"] = realized_pnl
+            payload["realized_pnl"] = realized_pnl
+        if exit_price is not None:
+            payload["exit_price"] = exit_price
+        if position_size is not None:
+            payload["position_size"] = abs(position_size)
+        elif getattr(state, "filled_amount", None) is not None:
+            payload["position_size"] = abs(float(state.filled_amount))
+
+        return payload
+
+    def _fetch_recent_my_trades(self, exchange: Any, symbol: str, state: Any) -> list[dict[str, Any]]:
+        if not hasattr(exchange, "fetch_my_trades"):
+            return []
+
+        since = self._exchange_since_millis(getattr(state, "created_at", None))
+        try:
+            trades = exchange.fetch_my_trades(symbol, since=since, limit=100)
+        except TypeError:
+            trades = exchange.fetch_my_trades(symbol)
+        except Exception as exc:
+            self._logger.warning(
+                "sync_exchange: fetch_my_trades failed for symbol=%s error=%s",
+                symbol,
+                exc,
+            )
+            return []
+
+        if not isinstance(trades, list):
+            return []
+        return [trade for trade in trades if isinstance(trade, dict)]
+
+    @staticmethod
+    def _exchange_since_millis(value: Any) -> int | None:
+        if value is None or not hasattr(value, "timestamp"):
+            return None
+        try:
+            return max(0, int(value.timestamp() * 1000) - 60_000)
+        except Exception:
+            return None
+
+    @classmethod
+    def _extract_realized_pnl(cls, trade: dict[str, Any]) -> float | None:
+        return cls._extract_trade_float(
+            trade,
+            "realizedPnl",
+            "realized_pnl",
+            "realizedProfit",
+            "realized_profit",
+        )
+
+    @staticmethod
+    def _extract_trade_float(trade: dict[str, Any], *keys: str) -> float | None:
+        candidates: list[Any] = []
+        for key in keys:
+            candidates.append(trade.get(key))
+        info = trade.get("info")
+        if isinstance(info, dict):
+            for key in keys:
+                candidates.append(info.get(key))
+
+        for value in candidates:
+            if value is None or value == "":
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
     @staticmethod
     def _normalize_symbol(value: Any) -> str | None:
         if value is None:
@@ -1576,6 +1675,32 @@ class CcxtSignalExecutor:
                 base = raw[: -len(quote)]
                 return f"{base}/{quote}"
         return raw
+
+    @classmethod
+    def _position_symbol_matches(cls, expected_symbol: str | None, position: Any) -> bool:
+        expected_market = cls._market_symbol_key(expected_symbol)
+        if not expected_market or not isinstance(position, dict):
+            return False
+
+        candidates = [position.get("symbol")]
+        info = position.get("info")
+        if isinstance(info, dict):
+            candidates.extend(
+                info.get(key)
+                for key in ("symbol", "pair", "market", "instrument", "instrumentId")
+            )
+
+        for candidate in candidates:
+            if cls._market_symbol_key(candidate) == expected_market:
+                return True
+        return False
+
+    @classmethod
+    def _market_symbol_key(cls, value: Any) -> str | None:
+        normalized = cls._normalize_symbol(value)
+        if not normalized:
+            return None
+        return normalized.split(":", 1)[0]
 
 
 # ---------------------------------------------------------------------------

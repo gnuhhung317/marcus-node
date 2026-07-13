@@ -138,7 +138,7 @@ class TestExchangeSync(unittest.IsolatedAsyncioTestCase):
         }
         mock_exchange.fetch_positions.return_value = [
             {
-                "symbol": "BTC/USDT",
+                "symbol": "BTC/USDT:USDT",
                 "contracts": 0.05,
                 "size": 0.05
             }
@@ -154,6 +154,35 @@ class TestExchangeSync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].event_type, ExecutionEventType.ORDER_FILLED)
         self.assertEqual(events[1].event_type, ExecutionEventType.POSITION_OPENED)
         self.assertEqual(events[1].payload["position_size"], 0.05)
+
+    async def test_sync_exchange_future_open_position_skips_close_when_position_query_fails(self) -> None:
+        signal_id = "sig-future-open-query-fails"
+        await self.store.get_or_create_signal(signal_id)
+        await self.store.update_signal_state(
+            signal_id,
+            signal_state="OPEN",
+            order_state="FILLED",
+            position_state="OPENED",
+            policies={"market_type": "FUTURE"},
+            order_id="ord-future-open-query-fails",
+            order_symbol="BTC/USDT"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_order.return_value = {
+            "id": "ord-future-open-query-fails",
+            "status": "closed",
+            "symbol": "BTC/USDT",
+            "price": 60000.0,
+            "average": 60000.0
+        }
+        mock_exchange.fetch_positions.side_effect = RuntimeError("binance unavailable")
+        self.executor._exchanges["FUTURE"] = mock_exchange
+        self.executor._exchange_injected = True
+
+        events = await self.executor.sync_exchange(signal_id, self.store)
+
+        self.assertEqual(events, [])
 
     async def test_sync_exchange_future_position_closed(self) -> None:
         signal_id = "sig-future-closed"
@@ -180,10 +209,26 @@ class TestExchangeSync(unittest.IsolatedAsyncioTestCase):
         }
         mock_exchange.fetch_positions.return_value = [
             {
-                "symbol": "BTC/USDT",
+                "symbol": "BTC/USDT:USDT",
                 "contracts": 0.0,
                 "size": 0.0
             }
+        ]
+        mock_exchange.fetch_my_trades.return_value = [
+            {
+                "id": "entry-trade",
+                "symbol": "BTC/USDT",
+                "price": 60000.0,
+                "amount": 0.05,
+                "info": {"realizedPnl": "0"},
+            },
+            {
+                "id": "close-trade",
+                "symbol": "BTC/USDT",
+                "price": 60125.0,
+                "amount": 0.05,
+                "info": {"realizedPnl": "6.25"},
+            },
         ]
         self.executor._exchanges["FUTURE"] = mock_exchange
         self.executor._exchange_injected = True
@@ -194,6 +239,10 @@ class TestExchangeSync(unittest.IsolatedAsyncioTestCase):
         # We expect POSITION_CLOSED event
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].event_type, ExecutionEventType.POSITION_CLOSED)
+        self.assertEqual(events[0].payload["pnl"], 6.25)
+        self.assertEqual(events[0].payload["realized_pnl"], 6.25)
+        self.assertEqual(events[0].payload["exit_price"], 60125.0)
+        self.assertEqual(events[0].payload["position_size"], 0.05)
 
     async def test_sync_exchange_skips_rejected_signal_without_symbol(self) -> None:
         signal_id = "sig-rejected"

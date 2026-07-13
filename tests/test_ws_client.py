@@ -60,6 +60,33 @@ class _FakeWebSocket:
 
 
 class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
+    async def test_should_send_protocol_heartbeat_after_ping_pong(self) -> None:
+        fake_ws = _FakeWebSocket(messages=[])
+
+        async def noop(_: dict[str, Any] | str) -> None:
+            return None
+
+        client = ResilientWebSocketClient(
+            ws_url="ws://test/ws",
+            ws_token="secret-token",
+            heartbeat_interval_seconds=5,
+            heartbeat_timeout_seconds=2,
+            reconnect_initial_delay_seconds=1,
+            reconnect_max_delay_seconds=8,
+            on_signal=noop,
+            on_resync=noop,
+            bot_id="bot-01",
+            timestamp_func=lambda: "2026-07-13T10:00:00Z",
+        )
+
+        await client._do_heartbeat(fake_ws)
+
+        self.assertEqual(json.loads(fake_ws.sent_frames[0]), {
+            "type": "heartbeat",
+            "botId": "bot-01",
+            "timestamp": "2026-07-13T10:00:00Z",
+        })
+
     async def test_should_resync_before_processing_first_signal(self) -> None:
         stop_event = asyncio.Event()
         events: list[tuple[str, str]] = []

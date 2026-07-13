@@ -268,6 +268,12 @@ class ResilientWebSocketClient:
     async def _do_heartbeat(self, websocket: Any) -> None:
         pong_waiter = websocket.ping()
         await asyncio.wait_for(pong_waiter, timeout=self._heartbeat_timeout_seconds)
+        async with self._send_lock:
+            await websocket.send(json.dumps({
+                "type": "heartbeat",
+                "botId": self._bot_id,
+                "timestamp": self._timestamp_func(),
+            }, separators=(",", ":")))
         self._mark_heartbeat("ping_pong")
 
     def _mark_heartbeat(self, source: str) -> None:
