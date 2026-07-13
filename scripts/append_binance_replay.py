@@ -50,6 +50,14 @@ def as_utc_datetime(value: Any) -> datetime:
 
 def load_config() -> dict[str, Any]:
     dotenv.load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    repo_root = Path(__file__).resolve().parent.parent
+    default_dashboard_inventory = (
+        repo_root.parent.parent
+        / "self-projects"
+        / "macd-overlay - Copy"
+        / "ansible"
+        / "inventory.ini"
+    )
 
     return {
         "EXCHANGE_ID": os.getenv("EXCHANGE_ID", "binance"),
@@ -64,6 +72,10 @@ def load_config() -> dict[str, Any]:
         "DB_USER": os.getenv("DB_USER", "user"),
         "DB_PASSWORD": os.getenv("DB_PASSWORD", "password"),
         "SYSTEM_WS_TOKEN": os.getenv("SYSTEM_WS_TOKEN", "ws_default_token"),
+        "DASHBOARD_INVENTORY_PATH": os.getenv("DASHBOARD_INVENTORY_PATH", str(default_dashboard_inventory)),
+        "DASHBOARD_BOT_NAME": os.getenv("DASHBOARD_BOT_NAME", "pnl_dashboard"),
+        "DASHBOARD_REMOTE_DB_PATH": os.getenv("DASHBOARD_REMOTE_DB_PATH", ""),
+        "DASHBOARD_START": os.getenv("DASHBOARD_START", "2026-05-01 00:00:00"),
         "APPEND_BOOTSTRAP_DAYS": int(os.getenv("APPEND_BOOTSTRAP_DAYS", str(DEFAULT_BOOTSTRAP_DAYS))),
         "APPEND_OVERLAP_DAYS": int(os.getenv("APPEND_OVERLAP_DAYS", str(DEFAULT_OVERLAP_DAYS))),
     }
@@ -196,6 +208,57 @@ def parse_symbols(symbols_arg: str | None) -> list[str]:
     if not symbols_arg:
         return []
     return [symbol.strip() for symbol in symbols_arg.split(",") if symbol.strip()]
+
+
+def is_all_trading_pair(value: Any) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).strip().upper()
+    return normalized == "ALL" or normalized.startswith("ALL/")
+
+
+def normalize_symbol_for_storage(symbol: Any) -> str | None:
+    if symbol is None:
+        return None
+
+    raw = str(symbol).strip().upper()
+    if not raw:
+        return None
+    if "/" in raw:
+        return raw
+
+    suffix_index = raw.find(":")
+    base_and_quote = raw[:suffix_index] if suffix_index >= 0 else raw
+    suffix = raw[suffix_index + 1 :] if suffix_index >= 0 else None
+
+    normalized = normalize_symbol_without_suffix(base_and_quote)
+    if suffix is None or not suffix.strip():
+        return normalized
+    return f"{normalized}:{suffix.strip().upper()}"
+
+
+def normalize_symbol_without_suffix(value: str) -> str:
+    for quote in ("USDT", "USDC", "BUSD", "USD", "FDUSD", "TUSD", "BTC", "ETH", "BNB", "TRY", "EUR"):
+        if value.endswith(quote) and len(value) > len(quote):
+            return f"{value[:-len(quote)]}/{quote}"
+    return value
+
+
+def trade_source_symbol(trade: dict[str, Any]) -> str | None:
+    info = trade.get("info")
+    if isinstance(info, dict):
+        raw_symbol = info.get("symbol")
+        if raw_symbol:
+            return str(raw_symbol).strip().upper()
+
+    raw_symbol = trade.get("symbol")
+    if raw_symbol is None:
+        return None
+
+    text = str(raw_symbol).strip()
+    if not text:
+        return None
+    return text.upper()
 
 
 def state_scope_key(exchange_id: str, bot_id: str, user_id: str) -> str:
@@ -393,6 +456,10 @@ def compute_since_days(last_exit_at: datetime | None, bootstrap_days: int, overl
 
 
 def resolve_fetch_checkpoint(last_exit_at: datetime | None, state_checkpoint: datetime | None) -> datetime | None:
+    if last_exit_at is not None:
+        last_exit_at = as_utc_datetime(last_exit_at)
+    if state_checkpoint is not None:
+        state_checkpoint = as_utc_datetime(state_checkpoint)
     if state_checkpoint and last_exit_at:
         return max(last_exit_at, state_checkpoint)
     return state_checkpoint or last_exit_at
@@ -440,6 +507,7 @@ def serialize_fifo_queues(queues: dict[str, deque[dict[str, Any]]]) -> dict[str,
         for lot in queue:
             payload[symbol].append(
                 {
+                    "raw_symbol": str(lot.get("raw_symbol") or symbol),
                     "side": lot["side"],
                     "price": float(lot["price"]),
                     "amount": float(lot["amount"]),
@@ -461,6 +529,7 @@ def deserialize_fifo_queues(payload: dict[str, Any] | None) -> dict[str, deque[d
         for lot in lots or []:
             queue.append(
                 {
+                    "raw_symbol": str(lot.get("raw_symbol") or symbol),
                     "side": str(lot["side"]).lower(),
                     "price": float(lot["price"]),
                     "amount": float(lot["amount"]),
@@ -480,10 +549,13 @@ def normalize_raw_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for trade in trades:
         if trade.get("timestamp") is None:
             continue
+        raw_symbol = trade_source_symbol(trade)
+        symbol = normalize_symbol_for_storage(raw_symbol)
         normalized.append(
             {
                 "id": str(trade.get("id")),
-                "symbol": str(trade.get("symbol")),
+                "symbol": symbol or raw_symbol or str(trade.get("symbol")),
+                "raw_symbol": raw_symbol or str(trade.get("symbol")),
                 "side": str(trade.get("side")).lower(),
                 "price": float(trade.get("price") or 0.0),
                 "amount": float(trade.get("amount") or 0.0),
@@ -503,16 +575,16 @@ def match_trades_with_state(
 ) -> tuple[list[dict[str, Any]], dict[str, deque[dict[str, Any]]], list[dict[str, Any]]]:
     queues: dict[str, deque[dict[str, Any]]] = {}
     for symbol, queue in (initial_queues or {}).items():
-        queues[symbol] = deque(queue)
+        queues[normalize_symbol_for_storage(symbol) or str(symbol)] = deque(queue)
 
     seen_trade_ids = recent_trade_ids or {}
     closed_trades: list[dict[str, Any]] = []
     processed_trades: list[dict[str, Any]] = []
 
     for trade in normalize_raw_trades(trades):
-        symbol = trade["symbol"]
+        symbol = normalize_symbol_for_storage(trade["symbol"]) or trade["symbol"]
         trade_id = trade["id"]
-        if trade_id in seen_trade_ids.get(symbol, set()):
+        if trade_id in seen_trade_ids.get(symbol, set()) or trade_id in seen_trade_ids.get(str(symbol), set()):
             continue
 
         processed_trades.append(trade)
@@ -528,6 +600,7 @@ def match_trades_with_state(
         if not queue:
             queue.append(
                 {
+                    "raw_symbol": trade["raw_symbol"],
                     "side": side,
                     "price": price,
                     "amount": amount,
@@ -544,6 +617,7 @@ def match_trades_with_state(
         if queue_side == side:
             queue.append(
                 {
+                    "raw_symbol": trade["raw_symbol"],
                     "side": side,
                     "price": price,
                     "amount": amount,
@@ -575,7 +649,8 @@ def match_trades_with_state(
 
             closed_trades.append(
                 {
-                    "symbol": symbol,
+                    "symbol": oldest.get("raw_symbol") or trade["raw_symbol"] or symbol,
+                    "raw_symbol": oldest.get("raw_symbol") or trade["raw_symbol"] or symbol,
                     "side": trade_side,
                     "quantity": match_qty,
                     "entry_price": float(oldest["price"]),
@@ -594,6 +669,7 @@ def match_trades_with_state(
         if rem_amount > 0.00000001:
             queue.append(
                 {
+                    "raw_symbol": trade["raw_symbol"],
                     "side": side,
                     "price": price,
                     "amount": rem_amount,
@@ -612,6 +688,7 @@ def match_trades_with_state(
 def build_trade_seed_records(bot_id: str, trade: dict[str, Any], now: datetime) -> dict[str, Any]:
     trade_id = trade["trade_id"]
     side = str(trade["side"]).upper()
+    symbol = trade.get("raw_symbol") or trade.get("symbol")
     entry_action = "OPEN_LONG" if side == "LONG" else "OPEN_SHORT"
     exit_action = "CLOSE_LONG" if side == "LONG" else "CLOSE_SHORT"
 
@@ -653,7 +730,7 @@ def build_trade_seed_records(bot_id: str, trade: dict[str, Any], now: datetime) 
             "id": entry_signal_id,
             "signal_id": entry_signal_id,
             "bot_id": bot_id,
-            "symbol": trade["symbol"],
+            "symbol": symbol,
             "action": entry_action,
             "market_type": "FUTURE",
             "order_type": "MARKET",
@@ -670,7 +747,7 @@ def build_trade_seed_records(bot_id: str, trade: dict[str, Any], now: datetime) 
             "id": exit_signal_id,
             "signal_id": exit_signal_id,
             "bot_id": bot_id,
-            "symbol": trade["symbol"],
+            "symbol": symbol,
             "action": exit_action,
             "market_type": "FUTURE",
             "order_type": "MARKET",
@@ -714,7 +791,7 @@ def build_trade_seed_records(bot_id: str, trade: dict[str, Any], now: datetime) 
             "bot_id": bot_id,
             "trade_id": trade_id,
             "data_source": "OUT_OF_SAMPLE",
-            "symbol": trade["symbol"],
+            "symbol": symbol,
             "market_type": "FUTURE",
             "side": trade["side"],
             "quantity": trade["quantity"],
@@ -750,7 +827,7 @@ def load_portfolio_anchor_before(conn: Any, bot_id: str, user_id: str, before_ts
                 ),
                 (
                     "SELECT last_sync_at, total_capital, available_balance, realized_pnl, unrealized_pnl "
-                    "FROM user_portfolios WHERE user_id = %s AND last_sync_at < %s LIMIT 1;",
+                    "FROM user_portfolios WHERE user_id = %s AND last_sync_at < %s ORDER BY last_sync_at DESC LIMIT 1;",
                     (user_id, before_ts),
                 ),
             ]
@@ -770,7 +847,7 @@ def load_portfolio_anchor_before(conn: Any, bot_id: str, user_id: str, before_ts
                 ),
                 (
                     "SELECT last_sync_at, total_capital, available_balance, realized_pnl, unrealized_pnl "
-                    "FROM user_portfolios WHERE user_id = %s LIMIT 1;",
+                    "FROM user_portfolios WHERE user_id = %s ORDER BY last_sync_at DESC LIMIT 1;",
                     (user_id,),
                 ),
             ]
@@ -885,12 +962,12 @@ def delete_repair_window_rows(
 ) -> None:
     signal_ids = sorted(
         {
-            str(trade["entry_signal_id"])
-            for trade in window_closed_trades
+            str(seed_rows["entry_signal"]["signal_id"])
+            for seed_rows in (build_trade_seed_records(bot_id, trade, window_start) for trade in window_closed_trades)
         }
         | {
-            str(trade["exit_signal_id"])
-            for trade in window_closed_trades
+            str(seed_rows["exit_signal"]["signal_id"])
+            for seed_rows in (build_trade_seed_records(bot_id, trade, window_start) for trade in window_closed_trades)
         }
     )
     trade_ids = sorted({str(trade["trade_id"]) for trade in window_closed_trades})
@@ -980,17 +1057,24 @@ def build_scope_state(
     processed_trades: list[dict[str, Any]],
     queues: dict[str, deque[dict[str, Any]]],
     overlap_days: int,
+    previous_recent_trade_ids: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     if processed_trades:
         latest_trade_ts = max(trade["dt"] for trade in processed_trades)
         cutoff = latest_trade_ts - timedelta(days=overlap_days)
-        recent_trade_ids: dict[str, list[str]] = defaultdict(list)
+        recent_trade_ids: dict[str, set[str]] = defaultdict(set)
         for trade in processed_trades:
             if trade["dt"] >= cutoff:
-                recent_trade_ids[trade["symbol"]].append(trade["id"])
+                recent_trade_ids[normalize_symbol_for_storage(trade["symbol"]) or trade["symbol"]].add(trade["id"])
+        if previous_recent_trade_ids:
+            for symbol, trade_ids in previous_recent_trade_ids.items():
+                recent_trade_ids[normalize_symbol_for_storage(symbol) or str(symbol)].update(str(trade_id) for trade_id in trade_ids or [])
     else:
         latest_trade_ts = window_end
-        recent_trade_ids = defaultdict(list)
+        recent_trade_ids = defaultdict(set)
+        if previous_recent_trade_ids:
+            for symbol, trade_ids in previous_recent_trade_ids.items():
+                recent_trade_ids[normalize_symbol_for_storage(symbol) or str(symbol)] = {str(trade_id) for trade_id in trade_ids or []}
 
     return {
         "scope_key": scope_key,
@@ -1003,7 +1087,7 @@ def build_scope_state(
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
         "open_positions": serialize_fifo_queues(queues),
-        "recent_trade_ids": dict(recent_trade_ids),
+        "recent_trade_ids": {symbol: sorted(trade_ids) for symbol, trade_ids in recent_trade_ids.items()},
     }
 
 
@@ -1013,27 +1097,30 @@ def load_scope_trade_state(scope_state: dict[str, Any]) -> tuple[dict[str, deque
     payload = scope_state.get("recent_trade_ids")
     if isinstance(payload, dict):
         for symbol, trade_ids in payload.items():
-            recent_trade_ids[str(symbol)] = {str(trade_id) for trade_id in trade_ids or []}
+            recent_trade_ids[normalize_symbol_for_storage(symbol) or str(symbol)] = {str(trade_id) for trade_id in trade_ids or []}
     return queues, recent_trade_ids
 
 
-def resolve_symbols(conn: Any, bot_id: str, symbols_arg: str | None) -> list[str]:
-    symbols = parse_symbols(symbols_arg)
-    if symbols:
-        return symbols
-
+def load_bot_trading_pair(conn: Any, bot_id: str) -> str | None:
     cur = conn.cursor()
     try:
         cur.execute("SELECT trading_pair FROM bots WHERE bot_id = %s LIMIT 1;", (bot_id,))
         row = cur.fetchone()
-        if row and row[0]:
-            trading_pair = str(row[0]).strip()
-            if "/" in trading_pair:
-                return [trading_pair]
+        return str(row[0]).strip() if row and row[0] else None
     finally:
         cur.close()
 
-    return []
+
+def resolve_symbols(conn: Any, bot_id: str, symbols_arg: str | None) -> tuple[list[str], bool]:
+    symbols = parse_symbols(symbols_arg)
+    if symbols:
+        return symbols, False
+
+    trading_pair = load_bot_trading_pair(conn, bot_id)
+    if trading_pair and not is_all_trading_pair(trading_pair) and "/" in trading_pair:
+        return [trading_pair], False
+
+    return [], True
 
 
 def execute_window_replay(
@@ -1066,8 +1153,12 @@ def execute_window_replay(
         overlap_days,
         now,
     )
-    trade_fetch_start = window_start - timedelta(days=bootstrap_days if mode == "repair-window" else overlap_days)
-    trade_since_days = compute_fetch_since_days(trade_fetch_start, window_end, bootstrap_days)
+    trade_fetch_start = window_start - timedelta(days=bootstrap_days if mode == "repair-window" else 0)
+    trade_since_days = compute_fetch_since_days(
+        trade_fetch_start,
+        window_end,
+        bootstrap_days if mode == "repair-window" else overlap_days,
+    )
 
     print(f"Window start: {window_start.isoformat()}")
     print(f"Window end:   {window_end.isoformat()}")
@@ -1105,9 +1196,6 @@ def execute_window_replay(
         if trade["exit_timestamp"] >= window_start and trade["exit_timestamp"] <= window_end
     ]
 
-    if mode == "repair-window":
-        delete_repair_window_rows(conn, bot_id, user_id, window_start, window_end, window_closed_trades)
-
     if not yes:
         print(
             f"\nAbout to seed {len(window_closed_trades)} trade(s) and {len(dashboard_points)} dashboard point(s) for {user_email}."
@@ -1116,6 +1204,9 @@ def execute_window_replay(
         if confirm not in {"y", "yes"}:
             print("Aborted.")
             return 0, 0, 0
+
+    if mode == "repair-window":
+        delete_repair_window_rows(conn, bot_id, user_id, window_start, window_end, window_closed_trades)
 
     window_points = build_dashboard_history_points(anchor, dashboard_points, window_closed_trades)
     if not window_points:
@@ -1171,6 +1262,7 @@ def execute_window_replay(
         processed_trades,
         updated_queues,
         overlap_days,
+        previous_recent_trade_ids=scope_state.get("recent_trade_ids") if isinstance(scope_state.get("recent_trade_ids"), dict) else None,
     )
     state_payload["currency"] = current_state["currency"]
     save_scoped_replay_state(state_file, scope_key, state_payload)
@@ -1556,15 +1648,17 @@ def append_portfolio_rows(
                 now,
                 now,
                 exchange_id,
-                point["equity"],
-                ts,
                 point["cash"],
+                ts,
+                point["equity"],
                 point["unrealized_pnl"],
+                0,
                 user_id,
                 user_subscription_id,
                 bot_id,
                 currency,
                 "DRY_RUN",
+                True,
             )
         )
         aggregate_rows.append(
@@ -1612,22 +1706,24 @@ def append_portfolio_rows(
             cur,
             """
             INSERT INTO portfolio_balance_history (
-                id, created_at, updated_at, exchange_id, total, snapshot_at, free, unrealized_pnl,
-                user_id, user_subscription_id, bot_id, currency, execution_mode
+                id, created_at, updated_at, exchange_id, free, snapshot_at, total, unrealized_pnl,
+                used, user_id, user_subscription_id, bot_id, currency, execution_mode, is_active
             ) VALUES %s
             ON CONFLICT (id) DO UPDATE SET
                 created_at = EXCLUDED.created_at,
                 updated_at = EXCLUDED.updated_at,
                 exchange_id = EXCLUDED.exchange_id,
-                total = EXCLUDED.total,
-                snapshot_at = EXCLUDED.snapshot_at,
                 free = EXCLUDED.free,
+                snapshot_at = EXCLUDED.snapshot_at,
+                total = EXCLUDED.total,
                 unrealized_pnl = EXCLUDED.unrealized_pnl,
+                used = EXCLUDED.used,
                 user_id = EXCLUDED.user_id,
                 user_subscription_id = EXCLUDED.user_subscription_id,
                 bot_id = EXCLUDED.bot_id,
                 currency = EXCLUDED.currency,
-                execution_mode = EXCLUDED.execution_mode;
+                execution_mode = EXCLUDED.execution_mode,
+                is_active = EXCLUDED.is_active;
             """,
             balance_rows,
             page_size=1000,
@@ -1795,8 +1891,8 @@ def main() -> None:
         print(f"Selected bot: {bot_id}")
         print(f"Selected trader: {user_email}")
 
-        symbols = resolve_symbols(conn, bot_id, args.symbols)
-        if not symbols:
+        symbols, allow_auto_discover = resolve_symbols(conn, bot_id, args.symbols)
+        if not symbols and not allow_auto_discover:
             raise RuntimeError("Could not resolve trading symbols. Pass --symbols or ensure the bot has a trading_pair.")
 
         scope_key = state_scope_key(config["EXCHANGE_ID"], bot_id, user_id)
@@ -1804,7 +1900,10 @@ def main() -> None:
 
         print(f"Mode: {args.mode}")
         print(f"State file: {state_file}")
-        print(f"Symbols: {', '.join(symbols)}")
+        if symbols:
+            print(f"Symbols: {', '.join(symbols)}")
+        else:
+            print("Symbols: auto-discover all traded symbols")
 
         if args.mode == "repair-window":
             execute_window_replay(

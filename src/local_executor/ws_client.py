@@ -31,6 +31,7 @@ class ResilientWebSocketClient:
         on_audit_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_control: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_replay_response: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_execution_ack: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_connection_loss: Callable[[str], Awaitable[None]] | None = None,
         bot_id: str = "unknown-bot",
         protocol_version: str = "1.0",
@@ -54,6 +55,7 @@ class ResilientWebSocketClient:
         self._on_audit_push = on_audit_push or self._noop_async
         self._on_control = on_control or self._noop_async
         self._on_replay_response = on_replay_response or self._noop_async
+        self._on_execution_ack = on_execution_ack or self._noop_async
         self._on_connection_loss = on_connection_loss
         self._bot_id = bot_id
         self._protocol_version = protocol_version
@@ -235,6 +237,10 @@ class ResilientWebSocketClient:
             await self._on_replay_response(payload)
             return True
 
+        if message_type == "execution_ack":
+            await self._on_execution_ack(payload)
+            return True
+
         if message_type in {"handshake-ack", "ack", "system"}:
             self._logger.info("Ignoring non-signal frame type=%s", message_type)
             return True
@@ -289,7 +295,7 @@ class ResilientWebSocketClient:
             return None
 
         normalized = frame_type.strip().lower()
-        if normalized not in {"signal", "heartbeat", "ack", "handshake-ack", "system", "audit-push", "control", "replay-response"}:
+        if normalized not in {"signal", "heartbeat", "ack", "handshake-ack", "system", "audit-push", "control", "replay-response", "execution_ack"}:
             self._invalid_message_count += 1
             self._logger.warning("Skipping unsupported frame type=%s", normalized)
             return None

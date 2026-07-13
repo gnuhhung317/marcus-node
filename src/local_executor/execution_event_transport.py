@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from collections.abc import Awaitable, Callable
@@ -32,6 +33,44 @@ class ExecutionEventType(str, Enum):
     POSITION_OPENED = "POSITION_OPENED"
     POSITION_UPDATED = "POSITION_UPDATED"
     POSITION_CLOSED = "POSITION_CLOSED"
+
+
+_BACKEND_EVENT_TYPE_CODES: dict[ExecutionEventType, str] = {
+    ExecutionEventType.SIGNAL_ACCEPTED: "signal.accepted",
+    ExecutionEventType.SIGNAL_REJECTED: "signal.rejected",
+    ExecutionEventType.ORDER_PLACED: "order.placed",
+    ExecutionEventType.ORDER_FILLED: "order.filled",
+    ExecutionEventType.ORDER_FAILED: "order.failed",
+    ExecutionEventType.ORDER_CANCELED: "order.canceled",
+    ExecutionEventType.POSITION_OPENED: "position.opened",
+    ExecutionEventType.POSITION_UPDATED: "position.updated",
+    ExecutionEventType.POSITION_CLOSED: "position.closed",
+}
+_BACKEND_EVENT_ID_NAMESPACE = uuid.UUID("2f6c2467-1b17-5a4f-b2ce-1c9f60b0df1a")
+
+
+def event_type_to_backend_code(event_type: ExecutionEventType) -> str:
+    """Return backend wire code for an execution event type."""
+    return _BACKEND_EVENT_TYPE_CODES[event_type]
+
+
+def stable_backend_event_id(*parts: Any) -> str:
+    """Build a deterministic backend-safe UUID event id."""
+    payload = "|".join(str(part) for part in parts)
+    return str(uuid.uuid5(_BACKEND_EVENT_ID_NAMESPACE, payload))
+
+
+def parse_execution_event_type(value: str) -> ExecutionEventType:
+    """Parse either backend wire code or legacy enum name."""
+    if value in ExecutionEventType.__members__:
+        return ExecutionEventType[value]
+
+    normalized = value.strip().lower()
+    for event_type, code in _BACKEND_EVENT_TYPE_CODES.items():
+        if normalized == code:
+            return event_type
+
+    return ExecutionEventType(value)
 
 
 class ACKStatus(str, Enum):
@@ -85,7 +124,7 @@ class ExecutionEvent:
             event_id=data["eventId"],
             signal_id=data["signalId"],
             sequence=data["sequence"],
-            event_type=ExecutionEventType(data["eventType"]),
+            event_type=parse_execution_event_type(data["eventType"]),
             sent_at=_parse_datetime(data["sentAt"]),
             exchange_time=_parse_datetime(data.get("exchangeTime")) if data.get("exchangeTime") else None,
             payload=data.get("payload", {}),
@@ -103,6 +142,15 @@ class ExecutionEvent:
             "exchangeTime": self.exchange_time.isoformat() if self.exchange_time else None,
             "payload": self.payload,
             "receivedAt": self.received_at.isoformat() if self.received_at else None,
+        }
+
+    def to_backend_json(self) -> dict[str, Any]:
+        """Serialize ExecutionEvent to the backend WebSocket wire contract."""
+        return {
+            **self.to_json(),
+            "eventType": event_type_to_backend_code(self.event_type),
+            "sentAt": _format_backend_datetime(self.sent_at),
+            "exchangeTime": _format_backend_datetime(self.exchange_time) if self.exchange_time else None,
         }
 
 
@@ -372,3 +420,9 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return None
     except (ValueError, AttributeError):
         return None
+
+
+def _format_backend_datetime(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

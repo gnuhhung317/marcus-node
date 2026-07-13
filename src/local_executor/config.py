@@ -28,6 +28,7 @@ class ExecutorConfig:
     heartbeat_stale_seconds: float = 45.0
     dry_run_initial_balance: float = 10000.0
     balance_sync_interval_seconds: float = 3600.0
+    execution_sync_interval_seconds: float = 30.0
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     log_level: str = "INFO"
@@ -78,6 +79,7 @@ class ExecutorConfig:
             heartbeat_stale_seconds=_float("HEARTBEAT_STALE_SECONDS", 45.0),
             dry_run_initial_balance=_float("DRY_RUN_INITIAL_BALANCE", 10000.0),
             balance_sync_interval_seconds=_float("BALANCE_SYNC_INTERVAL_SECONDS", 3600.0),
+            execution_sync_interval_seconds=_float("EXECUTION_SYNC_INTERVAL_SECONDS", 30.0),
             telegram_bot_token=_optional("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=_optional("TELEGRAM_CHAT_ID"),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

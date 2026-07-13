@@ -61,6 +61,14 @@ class SignalState:
     protection_status: str | None = None
 
 
+@dataclass(slots=True)
+class OutboundExecutionEvent:
+    """Execution event waiting for backend acknowledgement."""
+    event: ExecutionEvent
+    delivery_attempts: int = 0
+    last_delivery_attempt: datetime | None = None
+
+
 class LocalExecutionStore:
     """
     SQLite-backed local execution state store.
@@ -169,6 +177,25 @@ class LocalExecutionStore:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ack_pending ON execution_acks(status)")
 
+        # Outbound execution events: pending delivery to backend
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS outbound_execution_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                signal_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                exchange_time TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                last_delivery_attempt TEXT,
+                FOREIGN KEY (signal_id) REFERENCES execution_signals(signal_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_outbound_execution_events_created ON outbound_execution_events(created_at)")
+
         # Recovery tracking
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS recovery_state (
@@ -268,7 +295,18 @@ class LocalExecutionStore:
         async with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT signal_id FROM execution_signals WHERE position_state != 'CLOSED'"
+                """
+                SELECT signal_id
+                FROM execution_signals
+                WHERE signal_state NOT IN ('REJECTED', 'CLOSED')
+                  AND position_state != 'CLOSED'
+                  AND (
+                    order_symbol IS NOT NULL
+                    OR order_id IS NOT NULL
+                    OR order_state IN ('PLACED', 'FILLED')
+                    OR position_state IN ('OPENED', 'UPDATING')
+                  )
+                """
             )
             return [row[0] for row in cursor.fetchall()]
 
@@ -567,6 +605,155 @@ class LocalExecutionStore:
             """, (now, event_id))
             self._conn.commit()
 
+    # ============ Outbound Execution Event Outbox ============
+
+    async def store_outbound_execution_event(self, event: ExecutionEvent) -> bool:
+        """Store an execution event until the backend acknowledges it."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT id FROM outbound_execution_events WHERE event_id = ?",
+                (event.event_id,),
+            )
+            if cursor.fetchone():
+                return False
+
+            now = datetime.utcnow().isoformat()
+            try:
+                cursor.execute("""
+                    INSERT INTO outbound_execution_events
+                    (event_id, signal_id, sequence, event_type, sent_at,
+                     exchange_time, payload, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    event.event_id,
+                    event.signal_id,
+                    event.sequence,
+                    event.event_type.value,
+                    event.sent_at.isoformat(),
+                    event.exchange_time.isoformat() if event.exchange_time else None,
+                    _serialize_payload(event.payload),
+                    now,
+                ))
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    async def normalize_outbound_execution_event_id(self, old_event_id: str, new_event_id: str) -> bool:
+        """Rename a pending outbound event so it can fit backend constraints."""
+        if old_event_id == new_event_id:
+            return False
+
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT id FROM outbound_execution_events WHERE event_id = ?",
+                (old_event_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            cursor.execute(
+                "SELECT id FROM outbound_execution_events WHERE event_id = ?",
+                (new_event_id,),
+            )
+            if cursor.fetchone():
+                cursor.execute(
+                    "DELETE FROM outbound_execution_events WHERE event_id = ?",
+                    (old_event_id,),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE outbound_execution_events SET event_id = ? WHERE event_id = ?",
+                    (new_event_id, old_event_id),
+                )
+
+            self._conn.commit()
+            self._logger.info(
+                "Outbound execution event normalized event_id=%s normalized_event_id=%s",
+                old_event_id,
+                new_event_id,
+            )
+            return True
+
+    async def get_pending_outbound_execution_events(self, limit: int = 100) -> list[OutboundExecutionEvent]:
+        """Return outbound execution events that still need backend ACK."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("""
+                SELECT * FROM outbound_execution_events
+                ORDER BY created_at ASC
+                LIMIT ?
+            """, (limit,))
+            return [self._row_to_outbound_execution_event(row) for row in cursor.fetchall()]
+
+    async def requeue_outbound_execution_events(self, signal_id: str, from_sequence: int) -> int:
+        """Recreate missing outbound rows from the local immutable execution event log."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("""
+                SELECT event_id, signal_id, sequence, event_type, sent_at, exchange_time, payload
+                FROM execution_events
+                WHERE signal_id = ? AND sequence >= ?
+                ORDER BY sequence ASC
+            """, (signal_id, from_sequence))
+
+            restored = 0
+            now = datetime.utcnow().isoformat()
+            for row in cursor.fetchall():
+                cursor.execute(
+                    "SELECT 1 FROM outbound_execution_events WHERE event_id = ?",
+                    (row["event_id"],),
+                )
+                if cursor.fetchone():
+                    continue
+
+                cursor.execute("""
+                    INSERT INTO outbound_execution_events
+                    (event_id, signal_id, sequence, event_type, sent_at,
+                     exchange_time, payload, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    row["event_id"],
+                    row["signal_id"],
+                    row["sequence"],
+                    row["event_type"],
+                    row["sent_at"],
+                    row["exchange_time"],
+                    row["payload"],
+                    now,
+                ))
+                restored += 1
+
+            self._conn.commit()
+            return restored
+
+    async def mark_outbound_execution_event_delivered(self, event_id: str) -> None:
+        """Remove an outbound event after backend ACK OK."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "DELETE FROM outbound_execution_events WHERE event_id = ?",
+                (event_id,),
+            )
+            self._conn.commit()
+            self._logger.debug("Outbound execution event marked delivered event_id=%s", event_id)
+
+    async def increment_outbound_execution_event_attempts(self, event_id: str) -> None:
+        """Record a delivery attempt for an outbound execution event."""
+        async with self._lock:
+            cursor = self._conn.cursor()
+            now = datetime.utcnow().isoformat()
+            cursor.execute("""
+                UPDATE outbound_execution_events
+                SET delivery_attempts = delivery_attempts + 1,
+                    last_delivery_attempt = ?
+                WHERE event_id = ?
+            """, (now, event_id))
+            self._conn.commit()
+
     # ============ Recovery Support ============
 
     async def set_recovery_state(self, signal_id: str, bootstrap_sequence: int) -> None:
@@ -648,6 +835,22 @@ class LocalExecutionStore:
             error_code=error_code,
             error_message=row["error_message"],
             received_at=_parse_datetime(row["received_at"]),
+        )
+
+    def _row_to_outbound_execution_event(self, row: sqlite3.Row) -> OutboundExecutionEvent:
+        """Convert SQLite row to OutboundExecutionEvent."""
+        return OutboundExecutionEvent(
+            event=ExecutionEvent(
+                event_id=row["event_id"],
+                signal_id=row["signal_id"],
+                sequence=row["sequence"],
+                event_type=ExecutionEventType(row["event_type"]),
+                sent_at=_parse_datetime(row["sent_at"]),
+                exchange_time=_parse_datetime(row["exchange_time"]),
+                payload=_deserialize_payload(row["payload"]),
+            ),
+            delivery_attempts=row["delivery_attempts"],
+            last_delivery_attempt=_parse_datetime(row["last_delivery_attempt"]),
         )
 
 

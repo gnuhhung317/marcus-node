@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from dataclasses import replace
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from .config import ExecutorConfig
-from .execution import CcxtSignalExecutor
+from .execution import CcxtSignalExecutor, ExecutionResult
 from .local_store import LocalExecutionStore
 from .ws_client import ResilientWebSocketClient
 from .recovery_manager import ExecutionRecoveryManager
 from .execution_state_engine import ExecutionStateEngine
-from .execution_event_transport import ExecutionEvent
+from .execution_event_transport import ExecutionEvent, ExecutionEventType, stable_backend_event_id
 from .notifications import TelegramNotifier, build_executor_alert
 
 SignalHandler = Callable[[dict[str, Any]], Awaitable[None]]
@@ -46,6 +49,10 @@ class LocalExecutorEngine:
         # Created once local_store is initialized in `run()`
         self._state_engine: ExecutionStateEngine | None = None
         self._recovery_manager: ExecutionRecoveryManager | None = None
+        self._outbound_execution_flush_lock = asyncio.Lock()
+        self._outbound_execution_waiting_ack_event_id: str | None = None
+        self._blocked_outbound_signal_sequences: dict[str, int] = {}
+        self._scheduled_execution_flush_task: asyncio.Task[None] | None = None
         # Futures waiting for replay responses keyed by signal_id
         self._replay_waiters: dict[str, asyncio.Future] = {}
         self._on_signal = on_signal or self._default_signal_handler
@@ -59,6 +66,7 @@ class LocalExecutorEngine:
             on_signal=self._handle_signal,
             on_resync=self._on_resync,
             on_replay_response=self._handle_replay_response,
+            on_execution_ack=self._handle_execution_ack,
             on_connection_loss=self._notify_connection_loss,
             bot_id=config.bot_id,
             protocol_version=config.protocol_version,
@@ -87,6 +95,7 @@ class LocalExecutorEngine:
             asyncio.create_task(self._ws_client.run(stop_event=stop_event), name="ws_client_run"),
             asyncio.create_task(self._balance_sync_loop(stop_event), name="balance_sync_loop"),
             asyncio.create_task(self._deadline_sweeper_loop(stop_event), name="deadline_sweeper_loop"),
+            asyncio.create_task(self._execution_sync_loop(stop_event), name="execution_sync_loop"),
         ]
 
         try:
@@ -116,6 +125,7 @@ class LocalExecutorEngine:
 
             if self._local_store is not None:
                 await self._local_store.close()
+            await self._cancel_scheduled_execution_flush()
 
     # ── Signal handling ────────────────────────────────────────────────────
 
@@ -184,12 +194,23 @@ class LocalExecutorEngine:
                 filled_amount = result.filled_amount if result.filled_amount is not None else 0.0
                 order_state = "FILLED" if filled_amount > 0 else "PLACED"
                 position_state = "OPENED" if filled_amount > 0 else "NONE"
+                backend_events = self._build_initial_execution_events(
+                    signal_id=signal_id,
+                    payload=payload,
+                    result=result,
+                    order_symbol=order_symbol,
+                    order_id=order_id,
+                    market_type=market_type,
+                    filled_amount=filled_amount,
+                )
+                backend_last_sequence = backend_events[-1].sequence if backend_events else None
 
                 await self._local_store.update_signal_state(
                     signal_id,
                     signal_state="OPEN",
                     order_state=order_state,
                     position_state=position_state,
+                    last_sequence=backend_last_sequence,
                     policies=payload.get("policies"),
                     order_id=order_id,
                     order_symbol=order_symbol,
@@ -202,6 +223,9 @@ class LocalExecutorEngine:
                     stop_loss=result.stop_loss,
                     protection_status=result.protection_status,
                 )
+                for event in backend_events:
+                    await self._queue_execution_event(event)
+                await self._flush_pending_execution_events()
                 if result.execution_status in {"ENTRY_FILLED_UNPROTECTED", "PARTIALLY_PROTECTED"}:
                     await self._notify(
                         "Protection warning",
@@ -227,6 +251,220 @@ class LocalExecutorEngine:
                     market_type=result.market_type or payload.get("market_type") or payload.get("marketType") or self._config.exchange_default_type,
                     action=result.action or payload.get("action"),
                 )
+
+    def _build_initial_execution_events(
+        self,
+        signal_id: str,
+        payload: dict[str, Any],
+        result: ExecutionResult,
+        order_symbol: str | None,
+        order_id: str | None,
+        market_type: str | None,
+        filled_amount: float,
+    ) -> list[ExecutionEvent]:
+        symbol = order_symbol or payload.get("symbol") or payload.get("asset_pair") or payload.get("assetPair")
+        events = [
+            self._make_execution_event(
+                signal_id,
+                0,
+                ExecutionEventType.SIGNAL_ACCEPTED,
+                {
+                    "symbol": symbol,
+                    "action": result.action or payload.get("action"),
+                    "market_type": market_type,
+                    "policies": payload.get("policies"),
+                },
+            ),
+            self._make_execution_event(
+                signal_id,
+                1,
+                ExecutionEventType.ORDER_PLACED,
+                {
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "market_type": market_type,
+                },
+            ),
+        ]
+
+        if filled_amount > 0:
+            events.append(
+                self._make_execution_event(
+                    signal_id,
+                    2,
+                    ExecutionEventType.ORDER_FILLED,
+                    {
+                        "order_id": order_id,
+                        "symbol": symbol,
+                        "fill_price": self._extract_entry_fill_price(result),
+                        "filled_amount": filled_amount,
+                    },
+                )
+            )
+            events.append(
+                self._make_execution_event(
+                    signal_id,
+                    3,
+                    ExecutionEventType.POSITION_OPENED,
+                    {
+                        "symbol": symbol,
+                        "position_size": filled_amount,
+                        "market_type": market_type,
+                    },
+                )
+            )
+
+        return events
+
+    def _make_execution_event(
+        self,
+        signal_id: str,
+        sequence: int,
+        event_type: ExecutionEventType,
+        payload: dict[str, Any],
+    ) -> ExecutionEvent:
+        now = datetime.now(timezone.utc)
+        return ExecutionEvent(
+            event_id=stable_backend_event_id("sync", signal_id, sequence, event_type.value),
+            signal_id=signal_id,
+            sequence=sequence,
+            event_type=event_type,
+            sent_at=now,
+            exchange_time=now,
+            payload={key: value for key, value in payload.items() if value is not None},
+        )
+
+    def _extract_entry_fill_price(self, result: ExecutionResult) -> float | None:
+        candidates: list[Any] = []
+        if isinstance(result.raw_orders, dict):
+            entry = result.raw_orders.get("entry")
+            if isinstance(entry, dict):
+                candidates.extend([entry.get("average"), entry.get("price"), entry.get("fill_price")])
+        entry_detail = result.details.get("entry_order") if isinstance(result.details, dict) else None
+        if isinstance(entry_detail, dict):
+            candidates.extend([entry_detail.get("average"), entry_detail.get("price"), entry_detail.get("fill_price")])
+
+        for value in candidates:
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    async def _queue_execution_event(self, event: ExecutionEvent) -> None:
+        if self._local_store is None:
+            return
+        await self._local_store.store_event(event)
+        await self._local_store.store_outbound_execution_event(event)
+
+    async def _send_execution_event(self, event: ExecutionEvent) -> bool:
+        if self._local_store is not None:
+            await self._local_store.increment_outbound_execution_event_attempts(event.event_id)
+        frame = {
+            "type": "execution_event",
+            "botId": self._config.bot_id,
+            "payload": event.to_backend_json(),
+        }
+        return await self._ws_client.send_frame(frame)
+
+    async def _flush_pending_execution_events(self) -> None:
+        if self._local_store is None:
+            return
+        async with self._outbound_execution_flush_lock:
+            if self._outbound_execution_waiting_ack_event_id is not None:
+                return
+
+            pending = await self._local_store.get_pending_outbound_execution_events(limit=100)
+            if not pending:
+                return
+
+            item, retry_delay = self._select_next_outbound_execution_event(pending)
+            if item is None:
+                if retry_delay is not None:
+                    self._schedule_execution_event_flush(retry_delay)
+                return
+
+            event = item.event
+            if len(event.event_id) > 36:
+                normalized_event_id = stable_backend_event_id(
+                    "sync",
+                    event.signal_id,
+                    event.sequence,
+                    event.event_type.value,
+                )
+                await self._local_store.normalize_outbound_execution_event_id(event.event_id, normalized_event_id)
+                event = replace(event, event_id=normalized_event_id)
+
+            sent = await self._send_execution_event(event)
+            if sent:
+                self._outbound_execution_waiting_ack_event_id = event.event_id
+                return
+
+            self._schedule_execution_event_flush(self._retry_delay_seconds(item.delivery_attempts + 1))
+
+    def _select_next_outbound_execution_event(
+        self,
+        pending: list[Any],
+    ) -> tuple[Any | None, float | None]:
+        now = datetime.now(timezone.utc)
+        lowest_sequence_by_signal: dict[str, int] = {}
+        next_retry_delay: float | None = None
+
+        for item in pending:
+            signal_id = item.event.signal_id
+            current = lowest_sequence_by_signal.get(signal_id)
+            if current is None or item.event.sequence < current:
+                lowest_sequence_by_signal[signal_id] = item.event.sequence
+
+        for item in pending:
+            signal_id = item.event.signal_id
+            expected_sequence = self._blocked_outbound_signal_sequences.get(signal_id)
+            if expected_sequence is not None and item.event.sequence != expected_sequence:
+                continue
+            if item.event.sequence != lowest_sequence_by_signal.get(signal_id):
+                continue
+
+            retry_delay = self._remaining_retry_delay_seconds(item, now)
+            if retry_delay > 0:
+                next_retry_delay = retry_delay if next_retry_delay is None else min(next_retry_delay, retry_delay)
+                continue
+
+            return item, None
+
+        return None, next_retry_delay
+
+    def _remaining_retry_delay_seconds(self, item: Any, now: datetime) -> float:
+        if item.last_delivery_attempt is None or item.delivery_attempts <= 0:
+            return 0.0
+        retry_at = item.last_delivery_attempt.replace(tzinfo=timezone.utc).timestamp() + self._retry_delay_seconds(
+            item.delivery_attempts
+        )
+        return max(0.0, retry_at - now.timestamp())
+
+    def _retry_delay_seconds(self, attempts: int) -> float:
+        capped_attempts = max(0, attempts - 1)
+        return min(30.0, 0.5 * (2 ** capped_attempts))
+
+    def _schedule_execution_event_flush(self, delay_seconds: float) -> None:
+        if self._scheduled_execution_flush_task is not None and not self._scheduled_execution_flush_task.done():
+            return
+
+        async def _delayed_flush() -> None:
+            try:
+                await asyncio.sleep(max(0.0, delay_seconds))
+                await self._flush_pending_execution_events()
+            except asyncio.CancelledError:
+                return
+
+        self._scheduled_execution_flush_task = asyncio.create_task(_delayed_flush(), name="execution_event_flush_retry")
+
+    async def _cancel_scheduled_execution_flush(self) -> None:
+        if self._scheduled_execution_flush_task is None or self._scheduled_execution_flush_task.done():
+            return
+        self._scheduled_execution_flush_task.cancel()
+        await asyncio.gather(self._scheduled_execution_flush_task, return_exceptions=True)
+        self._scheduled_execution_flush_task = None
 
     async def _deadline_sweeper_loop(self, stop_event: asyncio.Event) -> None:
         """Periodic sweeper that enforces cancel/close deadlines recorded in signal policies."""
@@ -313,6 +551,7 @@ class LocalExecutorEngine:
 
     async def _on_resync(self, reason: str) -> None:
         self._logger.info("Resync triggered reason=%s", reason)
+        self._outbound_execution_waiting_ack_event_id = None
 
         if self._local_store is None or self._recovery_manager is None:
             self._logger.debug("Skipping recovery - local store or recovery manager not configured.")
@@ -344,15 +583,128 @@ class LocalExecutorEngine:
                 self._replay_waiters.pop(signal_id, None)
                 return []
 
-        # CCXT-based exchange sync to reconcile local state with exchange state
-        async def sync_exchange_func(signal_id: str) -> list[ExecutionEvent]:
-            return await self._executor.sync_exchange(signal_id, self._local_store)
-
         try:
-            status = await self._recovery_manager.recover(fetch_history_func=fetch_history_func, sync_exchange_func=sync_exchange_func)
+            status = await self._recovery_manager.recover(fetch_history_func=fetch_history_func)
             self._logger.info("Recovery status: phase=%s errors=%s", status.phase.value, status.errors)
+            await self._flush_pending_execution_events()
         except Exception as e:
             self._logger.error("Recovery run failed: %s", e, exc_info=True)
+
+    async def _execution_sync_loop(self, stop_event: asyncio.Event) -> None:
+        """Periodically reconcile active signals with exchange state and publish backend events."""
+        interval = max(1.0, self._config.execution_sync_interval_seconds)
+        self._logger.info("Execution sync loop started interval=%.1fs", interval)
+
+        await asyncio.sleep(2.0)
+
+        while not stop_event.is_set():
+            try:
+                await self._flush_pending_execution_events()
+                if (
+                    self._config.execution_mode == "live"
+                    and self._local_store is not None
+                    and self._state_engine is not None
+                ):
+                    signal_ids = await self._local_store.get_active_signals()
+                    for signal_id in signal_ids:
+                        await self._sync_signal_execution_state(signal_id)
+                    await self._flush_pending_execution_events()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self._logger.warning("Execution sync loop failed: %s", exc)
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+    async def _sync_signal_execution_state(self, signal_id: str) -> None:
+        if self._local_store is None or self._state_engine is None:
+            return
+
+        exchange_events = await self._executor.sync_exchange(signal_id, self._local_store)
+        if not exchange_events:
+            return
+
+        last_sequence = await self._local_store.get_last_sequence(signal_id)
+        for exchange_event in exchange_events:
+            last_sequence += 1
+            event = ExecutionEvent(
+                event_id=exchange_event.event_id,
+                signal_id=exchange_event.signal_id,
+                sequence=last_sequence,
+                event_type=exchange_event.event_type,
+                sent_at=exchange_event.sent_at,
+                exchange_time=exchange_event.exchange_time,
+                payload=exchange_event.payload,
+                received_at=datetime.now(timezone.utc),
+            )
+            try:
+                await self._state_engine.process_event(event)
+                await self._queue_execution_event(event)
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to process execution sync event signal_id=%s event_id=%s type=%s error=%s",
+                    signal_id,
+                    event.event_id,
+                    event.event_type.value,
+                    exc,
+                )
+
+    async def _handle_execution_ack(self, payload: dict[str, Any]) -> None:
+        event_id = payload.get("eventId") or payload.get("event_id")
+        signal_id = payload.get("signalId") or payload.get("signal_id")
+        status = str(payload.get("status") or "").strip().upper()
+        if not event_id:
+            self._logger.warning("Received execution_ack without eventId")
+            return
+
+        if str(event_id) == self._outbound_execution_waiting_ack_event_id:
+            self._outbound_execution_waiting_ack_event_id = None
+
+        if status == "OK":
+            if self._local_store is not None:
+                await self._local_store.mark_outbound_execution_event_delivered(str(event_id))
+                if signal_id is not None:
+                    self._blocked_outbound_signal_sequences.pop(str(signal_id), None)
+                await self._flush_pending_execution_events()
+            return
+
+        error_code = str(payload.get("errorCode") or payload.get("error_code") or "").strip().upper()
+        error_message = str(payload.get("errorMessage") or payload.get("error_message") or "")
+        self._logger.warning(
+            "Backend rejected execution event event_id=%s status=%s error_code=%s message=%s",
+            event_id,
+            status or "UNKNOWN",
+            error_code or None,
+            error_message or None,
+        )
+        if self._local_store is not None and error_code == "OUT_OF_ORDER" and signal_id:
+            expected_sequence = self._extract_expected_sequence(error_message)
+            if expected_sequence is not None:
+                restored = await self._local_store.requeue_outbound_execution_events(str(signal_id), expected_sequence)
+                self._blocked_outbound_signal_sequences[str(signal_id)] = expected_sequence
+                self._logger.info(
+                    "Requeued outbound execution events for out-of-order recovery signal_id=%s expected_sequence=%s restored=%s",
+                    signal_id,
+                    expected_sequence,
+                    restored,
+                )
+                await self._flush_pending_execution_events()
+                return
+
+        self._schedule_execution_event_flush(self._retry_delay_seconds(1))
+
+    def _extract_expected_sequence(self, error_message: str) -> int | None:
+        match = re.search(r"Expected sequence\s+(\d+),\s+received\s+\d+", error_message)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
 
     async def _notify_connection_loss(self, reason: str) -> None:
         await self._notify(

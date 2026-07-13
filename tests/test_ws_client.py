@@ -318,6 +318,45 @@ class ResilientWebSocketClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signals, ["sig-4"])
         self.assertGreaterEqual(counters["invalid_message_count"], 2)
 
+    async def test_should_dispatch_execution_ack_frame(self) -> None:
+        stop_event = asyncio.Event()
+        acks: list[str] = []
+
+        async def on_signal(payload: dict[str, Any]) -> None:
+            _ = payload
+            stop_event.set()
+
+        async def on_resync(reason: str) -> None:
+            _ = reason
+
+        async def on_execution_ack(payload: dict[str, Any]) -> None:
+            acks.append(str(payload["eventId"]))
+
+        socket = _FakeWebSocket(
+            messages=[
+                '{"type":"ack","payload":{"status":"ok"}}',
+                '{"type":"execution_ack","payload":{"eventId":"evt-1","status":"OK"}}',
+                '{"type":"signal","payload":{"signal_id":"sig-ack"}}',
+            ]
+        )
+
+        client = ResilientWebSocketClient(
+            ws_url="ws://test/ws",
+            ws_token="secret-token",
+            heartbeat_interval_seconds=5,
+            heartbeat_timeout_seconds=2,
+            reconnect_initial_delay_seconds=1,
+            reconnect_max_delay_seconds=8,
+            on_signal=on_signal,
+            on_resync=on_resync,
+            on_execution_ack=on_execution_ack,
+            connect_func=lambda *args, **kwargs: socket,
+        )
+
+        await client.run(stop_event=stop_event)
+
+        self.assertEqual(acks, ["evt-1"])
+
 
 if __name__ == "__main__":
     unittest.main()

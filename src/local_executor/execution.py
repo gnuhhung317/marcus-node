@@ -256,6 +256,13 @@ class CcxtSignalExecutor:
         if not state:
             self._logger.warning("sync_exchange: No local state found for signal_id=%s", signal_id)
             return []
+        if state.signal_state in {"REJECTED", "CLOSED"}:
+            self._logger.debug(
+                "sync_exchange: skipping terminal signal_id=%s signal_state=%s",
+                signal_id,
+                state.signal_state,
+            )
+            return []
             
         # Nếu vị thế cục bộ đã đóng (CLOSED), không cần làm gì thêm
         if state.position_state == "CLOSED":
@@ -263,7 +270,14 @@ class CcxtSignalExecutor:
             return []
 
         # Phân tích ký hiệu giao dịch (ví dụ: BTC/USDT) từ DB/lịch sử sự kiện/chính sách
-        symbol = await self._resolve_symbol(signal_id, state, local_store)
+        try:
+            symbol = await self._resolve_symbol(signal_id, state, local_store)
+        except ValueError:
+            self._logger.warning(
+                "sync_exchange: skipping signal_id=%s because no symbol could be resolved from local state or event history",
+                signal_id,
+            )
+            return []
         
         policies = state.policies or {}
         market_type = (
@@ -1285,14 +1299,15 @@ class CcxtSignalExecutor:
         timestamp: float | None = None
     ) -> Any:
         from datetime import datetime, timezone
-        from .execution_event_transport import ExecutionEvent
-        import uuid
+        from .execution_event_transport import ExecutionEvent, stable_backend_event_id
+        import json
         
         ts = timestamp or time.time()
         dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        payload_signature = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         
         return ExecutionEvent(
-            event_id=f"sync-{signal_id}-{event_type.value.lower()}-{uuid.uuid4().hex[:8]}",
+            event_id=stable_backend_event_id("exchange-sync", signal_id, event_type.value, payload_signature),
             signal_id=signal_id,
             sequence=0,
             event_type=event_type,

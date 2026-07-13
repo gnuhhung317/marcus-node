@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from local_executor.config import ExecutorConfig
 from local_executor.engine import LocalExecutorEngine
 from local_executor.execution import ExecutionResult, SignalSchema, CcxtSignalExecutor
+from local_executor.execution_event_transport import ExecutionEvent, ExecutionEventType, stable_backend_event_id
+from local_executor.execution_state_engine import ExecutionStateEngine
 
 
 class _FakeNotifier:
@@ -245,6 +247,202 @@ class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.stop_loss, 64000.0)
         self.assertEqual(state.protection_status, "PROTECTED")
         engine._executor._build_order.assert_not_called()
+
+    async def test_should_publish_filled_signal_lifecycle_events_to_backend(self) -> None:
+        from unittest.mock import AsyncMock
+        from local_executor.local_store import LocalExecutionStore
+
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+            exchange_default_type="FUTURE",
+        )
+        store = LocalExecutionStore(":memory:")
+        await store.initialize()
+        engine = LocalExecutorEngine(config=config, local_store=store)
+        engine._ws_client.send_frame = AsyncMock(return_value=True)
+        engine._executor.execute_signal = AsyncMock(
+            return_value=ExecutionResult(
+                mode="live",
+                order_id="entry-1",
+                details={"entry_order": {"average": 65000.0}},
+                entry_order_id="entry-1",
+                symbol="BTC/USDT",
+                market_type="FUTURE",
+                action="OPEN_LONG",
+                filled_amount=1.0,
+                execution_status="PROTECTED",
+                raw_orders={"entry": {"average": 65000.0}},
+            )
+        )
+
+        await engine._default_signal_handler(
+            {
+                "signal_id": "sig-live",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+                "market_type": "FUTURE",
+            }
+        )
+
+        pending = await store.get_pending_outbound_execution_events()
+        self.assertEqual(len(pending), 4)
+
+        sent_event_types = [
+            call.args[0]["payload"]["eventType"]
+            for call in engine._ws_client.send_frame.call_args_list
+            if call.args[0]["type"] == "execution_event"
+        ]
+        self.assertEqual(sent_event_types, ["signal.accepted"])
+
+        pending_event_ids = [item.event.event_id for item in pending]
+        self.assertEqual(len({len(event_id) for event_id in pending_event_ids}), 1)
+        self.assertTrue(all(len(event_id) <= 36 for event_id in pending_event_ids))
+
+        await engine._handle_execution_ack({"eventId": pending_event_ids[0], "status": "OK"})
+        await engine._handle_execution_ack({"eventId": pending_event_ids[1], "status": "OK"})
+        await engine._handle_execution_ack({"eventId": pending_event_ids[2], "status": "OK"})
+        await engine._handle_execution_ack({"eventId": pending_event_ids[3], "status": "OK"})
+
+        sent_event_types = [
+            call.args[0]["payload"]["eventType"]
+            for call in engine._ws_client.send_frame.call_args_list
+            if call.args[0]["type"] == "execution_event"
+        ]
+        self.assertEqual(
+            sent_event_types,
+            ["signal.accepted", "order.placed", "order.filled", "position.opened"],
+        )
+
+        pending_ids = [item.event.event_id for item in await store.get_pending_outbound_execution_events()]
+        self.assertEqual(pending_ids, [])
+
+        await store.close()
+
+    async def test_should_publish_position_closed_from_exchange_sync(self) -> None:
+        from unittest.mock import AsyncMock
+        from datetime import datetime, timezone
+        from local_executor.local_store import LocalExecutionStore
+
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+            exchange_default_type="FUTURE",
+        )
+        store = LocalExecutionStore(":memory:")
+        await store.initialize()
+        await store.get_or_create_signal("sig-close")
+        await store.update_signal_state(
+            "sig-close",
+            signal_state="OPEN",
+            order_state="FILLED",
+            position_state="OPENED",
+            last_sequence=3,
+            order_symbol="BTC/USDT",
+            market_type="FUTURE",
+        )
+
+        engine = LocalExecutorEngine(config=config, local_store=store)
+        engine._state_engine = ExecutionStateEngine(store)
+        engine._ws_client.send_frame = AsyncMock(return_value=True)
+        closed_event = ExecutionEvent(
+            event_id="sync-sig-close-position-closed",
+            signal_id="sig-close",
+            sequence=0,
+            event_type=ExecutionEventType.POSITION_CLOSED,
+            sent_at=datetime.now(timezone.utc),
+            exchange_time=datetime.now(timezone.utc),
+            payload={"symbol": "BTC/USDT", "pnl": 12.5, "exit_price": 65100.0},
+        )
+        engine._executor.sync_exchange = AsyncMock(return_value=[closed_event])
+
+        await engine._sync_signal_execution_state("sig-close")
+        await engine._flush_pending_execution_events()
+
+        sent_events = [
+            call.args[0]["payload"]
+            for call in engine._ws_client.send_frame.call_args_list
+            if call.args[0]["type"] == "execution_event"
+        ]
+        self.assertEqual(sent_events[-1]["eventType"], "position.closed")
+        self.assertEqual(sent_events[-1]["sequence"], 4)
+        self.assertEqual(sent_events[-1]["payload"]["pnl"], 12.5)
+
+        state = await store.get_signal_state("sig-close")
+        self.assertEqual(state.position_state, "CLOSED")
+        self.assertEqual(state.last_sequence, 4)
+
+        await store.close()
+
+    async def test_should_requeue_missing_sequence_when_backend_reports_out_of_order(self) -> None:
+        from unittest.mock import AsyncMock
+        from local_executor.local_store import LocalExecutionStore
+
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+            exchange_default_type="FUTURE",
+        )
+        store = LocalExecutionStore(":memory:")
+        await store.initialize()
+        engine = LocalExecutorEngine(config=config, local_store=store)
+        engine._ws_client.send_frame = AsyncMock(return_value=True)
+        engine._scheduled_execution_flush_task = None
+
+        await engine._default_signal_handler(
+            {
+                "signal_id": "sig-gap",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+                "market_type": "FUTURE",
+            }
+        )
+
+        initial_pending = await store.get_pending_outbound_execution_events()
+        accepted_event_id = initial_pending[0].event.event_id
+        await engine._handle_execution_ack({"eventId": accepted_event_id, "signalId": "sig-gap", "status": "OK"})
+
+        next_event_id = (await store.get_pending_outbound_execution_events())[0].event.event_id
+        await store.mark_outbound_execution_event_delivered(accepted_event_id)
+
+        await engine._handle_execution_ack(
+            {
+                "eventId": next_event_id,
+                "signalId": "sig-gap",
+                "status": "ERROR",
+                "errorCode": "OUT_OF_ORDER",
+                "errorMessage": "Expected sequence 0, received 1 for signalId sig-gap",
+            }
+        )
+
+        sent_event_types = [
+            call.args[0]["payload"]["eventType"]
+            for call in engine._ws_client.send_frame.call_args_list
+            if call.args[0]["type"] == "execution_event"
+        ]
+        self.assertEqual(sent_event_types[-1], "signal.accepted")
+
+        pending_sequences = [item.event.sequence for item in await store.get_pending_outbound_execution_events()]
+        self.assertIn(0, pending_sequences)
+        self.assertEqual(engine._blocked_outbound_signal_sequences["sig-gap"], 0)
+
+        await engine._cancel_scheduled_execution_flush()
+        await store.close()
 
 
 class SignalSchemaValidationTest(unittest.TestCase):

@@ -19,6 +19,21 @@ import dotenv
 # Set sys.path to allow imports from local_executor if needed
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+
+def configure_console_output():
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+configure_console_output()
+
+
 def load_config():
     dotenv_path = Path(__file__).resolve().parent.parent / ".env"
     dotenv.load_dotenv(dotenv_path)
@@ -83,6 +98,45 @@ def list_bots(conn):
 
 def _normalize_key(value):
     return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+def normalize_symbol_for_storage(symbol):
+    if symbol is None:
+        return None
+    raw = str(symbol).strip().upper()
+    if not raw:
+        return None
+    if "/" in raw:
+        return raw
+    suffix_index = raw.find(":")
+    base_and_quote = raw[:suffix_index] if suffix_index >= 0 else raw
+    suffix = raw[suffix_index + 1:] if suffix_index >= 0 else None
+    normalized = normalize_symbol_without_suffix(base_and_quote)
+    if not suffix or not suffix.strip():
+        return normalized
+    return f"{normalized}:{suffix.strip().upper()}"
+
+def normalize_symbol_without_suffix(value):
+    for quote in ("USDT", "USDC", "BUSD", "USD", "FDUSD", "TUSD", "BTC", "ETH", "BNB", "TRY", "EUR"):
+        if value.endswith(quote) and len(value) > len(quote):
+            return f"{value[:-len(quote)]}/{quote}"
+    return value
+
+
+def trade_source_symbol(trade):
+    info = trade.get("info")
+    if isinstance(info, dict):
+        raw_symbol = info.get("symbol")
+        if raw_symbol:
+            return str(raw_symbol).strip().upper()
+
+    raw_symbol = trade.get("symbol")
+    if raw_symbol is None:
+        return None
+
+    text = str(raw_symbol).strip()
+    if not text:
+        return None
+    return text.upper()
 
 def _email_local_part(email):
     email = str(email or "").strip()
@@ -249,10 +303,19 @@ def _attach_cumulative_fees(portfolio_points, closed_trades):
     return enriched
 
 def calculate_metrics(portfolio_points):
-    if len(portfolio_points) < 2:
+    valid_points = []
+    for point in portfolio_points:
+        try:
+            equity = float(point['equity'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(equity) and equity > 0.0:
+            valid_points.append(point)
+
+    if len(valid_points) < 2:
         return 0.0, 0.0, 0.0, 0
 
-    sorted_points = sorted(portfolio_points, key=lambda x: x['timestamp'])
+    sorted_points = sorted(valid_points, key=lambda x: x['timestamp'])
 
     first_equity = float(sorted_points[0]['equity'])
     last_equity = float(sorted_points[-1]['equity'])
@@ -370,9 +433,14 @@ def fetch_dashboard_portfolio_points(config, dashboard_start, dashboard_end=None
     if not points:
         raise RuntimeError("No dashboard portfolio rows found for the requested window.")
 
-    trimmed_points = list(points)
-    while len(trimmed_points) > 1 and float(trimmed_points[0]["equity"]) <= 0.0:
-        trimmed_points.pop(0)
+    # Dashboard syncs can emit transient zero-equity rows while the account
+    # balance is unavailable. A funded dry-run portfolio cannot legitimately
+    # reach zero, so do not persist those rows into the curve.
+    trimmed_points = [
+        point
+        for point in points
+        if math.isfinite(float(point["equity"])) and float(point["equity"]) > 0.0
+    ]
 
     if not trimmed_points:
         raise RuntimeError("Dashboard history only contained non-positive equity rows.")
@@ -512,7 +580,7 @@ def fetch_trades_from_exchange(config, symbols, since_days, mock=False):
                     'id': f"mock_ent_{symbol.replace('/', '_')}_{i}",
                     'timestamp': int(entry_time.timestamp() * 1000),
                     'datetime': entry_time.isoformat(),
-                    'symbol': symbol,
+                    'symbol': normalize_symbol_for_storage(symbol) or symbol,
                     'side': entry_side,
                     'price': entry_price,
                     'amount': qty,
@@ -531,7 +599,7 @@ def fetch_trades_from_exchange(config, symbols, since_days, mock=False):
                     'id': f"mock_ext_{symbol.replace('/', '_')}_{i}",
                     'timestamp': int(exit_time.timestamp() * 1000),
                     'datetime': exit_time.isoformat(),
-                    'symbol': symbol,
+                    'symbol': normalize_symbol_for_storage(symbol) or symbol,
                     'side': exit_side,
                     'price': exit_price,
                     'amount': qty,
@@ -624,8 +692,7 @@ def fetch_trades_from_exchange(config, symbols, since_days, mock=False):
             
         symbols = list(discovered_symbols)
         if not symbols:
-            print("No traded symbols discovered. Defaulting to BTC/USDT.")
-            symbols = ["BTC/USDT"]
+            print("No traded symbols discovered. Returning empty symbol set.")
         else:
             print(f"Discovered traded symbols: {', '.join(symbols)}")
             
@@ -663,6 +730,11 @@ def fetch_trades_from_exchange(config, symbols, since_days, mock=False):
                 fetched = exchange.fetch_my_trades(symbol, since=since_ts, limit=1000)
             if since_ts:
                 fetched = [t for t in fetched if t['timestamp'] >= since_ts]
+            for trade in fetched:
+                raw_symbol = trade_source_symbol(trade)
+                if raw_symbol:
+                    trade['raw_symbol'] = raw_symbol
+                    trade['symbol'] = raw_symbol
             print(f"  Fetched {len(fetched)} trades for {symbol}")
             all_trades.extend(fetched)
         except Exception as e:
@@ -676,7 +748,7 @@ def fifo_match_trades(trades):
     # Group trades by symbol
     trades_by_symbol = {}
     for t in trades:
-        sym = t['symbol']
+        sym = normalize_symbol_for_storage(t['symbol']) or t['symbol']
         if sym not in trades_by_symbol:
             trades_by_symbol[sym] = []
         trades_by_symbol[sym].append(t)
@@ -742,7 +814,7 @@ def fifo_match_trades(trades):
                         trade_side = 'SHORT'
                         
                     closed_trades.append({
-                        'symbol': sym,
+                        'symbol': trade.get('raw_symbol') or trade.get('symbol') or sym,
                         'side': trade_side,
                         'quantity': match_qty,
                         'entry_price': oldest['price'],

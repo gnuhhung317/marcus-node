@@ -194,3 +194,48 @@ class TestExchangeSync(unittest.IsolatedAsyncioTestCase):
         # We expect POSITION_CLOSED event
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].event_type, ExecutionEventType.POSITION_CLOSED)
+
+    async def test_sync_exchange_skips_rejected_signal_without_symbol(self) -> None:
+        signal_id = "sig-rejected"
+        await self.store.get_or_create_signal(signal_id)
+        await self.store.update_signal_state(
+            signal_id,
+            signal_state="REJECTED",
+            order_state="NONE",
+            position_state="NONE",
+        )
+
+        events = await self.executor.sync_exchange(signal_id, self.store)
+
+        self.assertEqual(events, [])
+
+    async def test_get_active_signals_excludes_rejected_signal(self) -> None:
+        await self.store.get_or_create_signal("sig-open")
+        await self.store.update_signal_state("sig-open", signal_state="OPEN", position_state="OPENED")
+        await self.store.get_or_create_signal("sig-rejected")
+        await self.store.update_signal_state("sig-rejected", signal_state="REJECTED", position_state="NONE")
+
+        active = await self.store.get_active_signals()
+
+        self.assertEqual(active, ["sig-open"])
+
+    async def test_get_active_signals_excludes_accepted_signal_without_exchange_context(self) -> None:
+        await self.store.get_or_create_signal("sig-accepted-empty")
+        await self.store.update_signal_state(
+            "sig-accepted-empty",
+            signal_state="ACCEPTED",
+            order_state="NONE",
+            position_state="NONE",
+        )
+        await self.store.get_or_create_signal("sig-open")
+        await self.store.update_signal_state(
+            "sig-open",
+            signal_state="ACCEPTED",
+            order_state="FILLED",
+            position_state="OPENED",
+            order_symbol="BTC/USDT",
+        )
+
+        active = await self.store.get_active_signals()
+
+        self.assertEqual(active, ["sig-open"])

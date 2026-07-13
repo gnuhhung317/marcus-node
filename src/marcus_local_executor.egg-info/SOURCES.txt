@@ -9,6 +9,7 @@ src/local_executor/execution.py
 src/local_executor/execution_event_transport.py
 src/local_executor/execution_state_engine.py
 src/local_executor/local_store.py
+src/local_executor/notifications.py
 src/local_executor/recovery_manager.py
 src/local_executor/ws_client.py
 src/marcus_local_executor.egg-info/PKG-INFO
@@ -17,7 +18,15 @@ src/marcus_local_executor.egg-info/dependency_links.txt
 src/marcus_local_executor.egg-info/entry_points.txt
 src/marcus_local_executor.egg-info/requires.txt
 src/marcus_local_executor.egg-info/top_level.txt
+tests/test_append_binance_replay.py
+tests/test_chaos_recovery.py
+tests/test_config.py
 tests/test_contract_compatibility.py
+tests/test_contract_matrix_v2.py
+tests/test_end2end_provision_and_connect.py
 tests/test_engine.py
+tests/test_exchange_sync.py
 tests/test_execution_events.py
+tests/test_notifications.py
+tests/test_remote_executor_e2e.py
 tests/test_ws_client.py
