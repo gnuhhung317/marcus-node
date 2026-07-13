@@ -178,6 +178,74 @@ class LocalExecutorEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Emergency forced-close sweep", fake_notifier.messages[0])
         self.assertIn(sid, fake_notifier.messages[0])
 
+    async def test_should_persist_entry_and_protection_metadata_without_rebuilding_order(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from local_executor.local_store import LocalExecutionStore
+
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=0.01,
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+            exchange_default_type="FUTURE",
+        )
+
+        store = LocalExecutionStore(":memory:")
+        await store.initialize()
+        engine = LocalExecutorEngine(config=config, local_store=store)
+        engine._executor.execute_signal = AsyncMock(
+            return_value=ExecutionResult(
+                mode="live",
+                order_id="entry-1",
+                details={"ok": True},
+                entry_order_id="entry-1",
+                tp_order_id="tp-1",
+                sl_order_id="sl-1",
+                symbol="BTC/USDT",
+                market_type="FUTURE",
+                action="OPEN_LONG",
+                requested_amount=1.0,
+                filled_amount=1.0,
+                take_profit=71000.0,
+                stop_loss=64000.0,
+                execution_status="PROTECTED",
+                protection_status="PROTECTED",
+            )
+        )
+        engine._executor._build_order = MagicMock(side_effect=AssertionError("_build_order should not be called"))
+
+        await engine._default_signal_handler(
+            {
+                "signal_id": "sig-store",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+                "market_type": "FUTURE",
+                "policies": {"market_type": "FUTURE"},
+            }
+        )
+
+        state = await store.get_signal_state("sig-store")
+        self.assertIsNotNone(state)
+        self.assertEqual(state.order_id, "entry-1")
+        self.assertEqual(state.order_state, "FILLED")
+        self.assertEqual(state.position_state, "OPENED")
+        self.assertEqual(state.order_symbol, "BTC/USDT")
+        self.assertEqual(state.market_type, "FUTURE")
+        self.assertEqual(state.action, "OPEN_LONG")
+        self.assertEqual(state.filled_amount, 1.0)
+        self.assertEqual(state.tp_order_id, "tp-1")
+        self.assertEqual(state.sl_order_id, "sl-1")
+        self.assertEqual(state.take_profit, 71000.0)
+        self.assertEqual(state.stop_loss, 64000.0)
+        self.assertEqual(state.protection_status, "PROTECTED")
+        engine._executor._build_order.assert_not_called()
+
 
 class SignalSchemaValidationTest(unittest.TestCase):
     def test_should_accept_minimal_valid_signal(self) -> None:
@@ -740,6 +808,159 @@ class CcxtSignalExecutorUpdateTpSlTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args[0], "ETH/USDT")
         self.assertEqual(call_args[4], 3150.0)
         self.assertEqual(call_args[5]["stopPrice"], 3150.0)
+
+
+class CcxtSignalExecutorProtectionFlowTest(unittest.IsolatedAsyncioTestCase):
+    def _executor(self, execution_mode: str = "live", exchange_default_type: str | None = "FUTURE") -> CcxtSignalExecutor:
+        config = ExecutorConfig(
+            ws_url="ws://localhost/ws",
+            ws_token="ws-token",
+            bot_id="bot-01",
+            exchange_id="binance",
+            exchange_api_key="key",
+            exchange_api_secret="secret",
+            default_order_amount=1.0,
+            default_order_type="market",
+            execution_mode=execution_mode,
+            exchange_default_type=exchange_default_type,
+        )
+        return CcxtSignalExecutor(config)
+
+    async def test_should_create_entry_then_sl_then_tp_for_open_long(self) -> None:
+        from unittest.mock import MagicMock
+
+        executor = self._executor()
+        exchange = MagicMock()
+        exchange.create_order.side_effect = [
+            {
+                "id": "entry-1",
+                "status": "closed",
+                "filled": 0.25,
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "price": 65000.0,
+                "average": 65000.0,
+            },
+            {"id": "sl-1", "status": "open", "symbol": "BTC/USDT"},
+            {"id": "tp-1", "status": "open", "symbol": "BTC/USDT"},
+        ]
+        executor._exchange = exchange
+
+        result = await executor.execute_signal(
+            {
+                "signal_id": "sig-protect-long",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+                "market_type": "FUTURE",
+                "amount": 0.25,
+                "take_profit": 71000,
+                "stop_loss": 64000,
+            }
+        )
+
+        self.assertEqual(result.mode, "live")
+        self.assertEqual(result.order_id, "entry-1")
+        self.assertEqual(result.entry_order_id, "entry-1")
+        self.assertEqual(result.sl_order_id, "sl-1")
+        self.assertEqual(result.tp_order_id, "tp-1")
+        self.assertEqual(result.execution_status, "PROTECTED")
+        self.assertEqual(result.protection_status, "PROTECTED")
+
+        self.assertEqual(exchange.create_order.call_count, 3)
+        entry_call, sl_call, tp_call = exchange.create_order.call_args_list
+        self.assertEqual(entry_call.args[0], "BTC/USDT")
+        self.assertEqual(entry_call.args[1], "market")
+        self.assertEqual(entry_call.args[2], "buy")
+        self.assertEqual(entry_call.args[5]["clientOrderId"], "sig-protect-long-entry")
+        self.assertEqual(sl_call.args[1], "STOP_MARKET")
+        self.assertEqual(sl_call.args[2], "sell")
+        self.assertTrue(sl_call.args[5]["reduceOnly"])
+        self.assertEqual(sl_call.args[5]["triggerPrice"], 64000.0)
+        self.assertEqual(sl_call.args[5]["clientOrderId"], "sig-protect-long-sl")
+        self.assertEqual(tp_call.args[1], "TAKE_PROFIT_MARKET")
+        self.assertEqual(tp_call.args[2], "sell")
+        self.assertTrue(tp_call.args[5]["reduceOnly"])
+        self.assertEqual(tp_call.args[5]["triggerPrice"], 71000.0)
+        self.assertEqual(tp_call.args[5]["clientOrderId"], "sig-protect-long-tp")
+
+    async def test_should_retry_sl_without_retrying_entry(self) -> None:
+        from unittest.mock import MagicMock
+
+        executor = self._executor()
+        exchange = MagicMock()
+        exchange.create_order.side_effect = [
+            {
+                "id": "entry-2",
+                "status": "closed",
+                "filled": 0.5,
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "price": 65000.0,
+                "average": 65000.0,
+            },
+            RuntimeError("SL failed"),
+            RuntimeError("SL failed"),
+            RuntimeError("SL failed"),
+        ]
+        executor._exchange = exchange
+
+        result = await executor.execute_signal(
+            {
+                "signal_id": "sig-protect-fail",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+                "market_type": "FUTURE",
+                "amount": 0.5,
+                "take_profit": 71000,
+                "stop_loss": 64000,
+            }
+        )
+
+        self.assertEqual(result.mode, "live")
+        self.assertEqual(result.order_id, "entry-2")
+        self.assertEqual(result.entry_order_id, "entry-2")
+        self.assertIsNone(result.tp_order_id)
+        self.assertIsNone(result.sl_order_id)
+        self.assertEqual(result.execution_status, "ENTRY_FILLED_UNPROTECTED")
+        self.assertEqual(result.protection_status, "UNPROTECTED")
+        self.assertIsNotNone(result.errors)
+        self.assertIn("Stop-loss protection failed", result.errors[0])
+        self.assertEqual(exchange.create_order.call_count, 4)
+
+    async def test_should_use_config_default_market_type_when_payload_omits_it(self) -> None:
+        from unittest.mock import MagicMock
+
+        executor = self._executor(exchange_default_type="FUTURE")
+        future_exchange = MagicMock()
+        future_exchange.create_order.side_effect = [
+            {
+                "id": "entry-3",
+                "status": "closed",
+                "filled": 1.0,
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "price": 65000.0,
+                "average": 65000.0,
+            }
+        ]
+        spot_exchange = MagicMock()
+        executor._exchanges["FUTURE"] = future_exchange
+        executor._exchanges["SPOT"] = spot_exchange
+        executor._exchange_injected = True
+
+        result = await executor.execute_signal(
+            {
+                "signal_id": "sig-default-market-type",
+                "action": "OPEN_LONG",
+                "symbol": "BTCUSDT",
+                "amount": 1.0,
+            }
+        )
+
+        self.assertEqual(result.market_type, "FUTURE")
+        self.assertEqual(result.execution_status, "ENTRY_FILLED")
+        self.assertTrue(future_exchange.create_order.called)
+        self.assertFalse(spot_exchange.create_order.called)
 
 
 if __name__ == "__main__":

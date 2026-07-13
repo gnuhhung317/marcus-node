@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -19,6 +20,20 @@ class ExecutionResult:
     order_id: str | None
     details: dict[str, Any]
     errors: list[str] | None = None
+    entry_order_id: str | None = None
+    tp_order_id: str | None = None
+    sl_order_id: str | None = None
+    symbol: str | None = None
+    market_type: str | None = None
+    action: str | None = None
+    requested_amount: float | None = None
+    filled_amount: float | None = None
+    take_profit: float | None = None
+    stop_loss: float | None = None
+    execution_status: str | None = None
+    protection_status: str | None = None
+    raw_orders: dict[str, Any] | None = None
+    warnings: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +68,12 @@ _ACTION_ALIASES: dict[str, str] = {
     "SELL_SHORT": "OPEN_SHORT",
     "BUY_TO_COVER": "CLOSE_SHORT",
 }
+
+_CLIENT_ORDER_ID_MAX_LEN = 32
+_ENTRY_FILL_CONFIRM_RETRIES = 3
+_ENTRY_FILL_CONFIRM_DELAY_SECONDS = 0.25
+_PROTECTION_CREATE_RETRIES = 3
+_PROTECTION_CREATE_DELAY_SECONDS = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -230,22 +251,32 @@ class CcxtSignalExecutor:
         
         Returns a list of synthetic ExecutionEvents required to reconcile local state with exchange state.
         """
+        # Lấy trạng thái tín hiệu cục bộ sau khi đã Replay (Phase 3)
         state = await local_store.get_signal_state(signal_id)
         if not state:
             self._logger.warning("sync_exchange: No local state found for signal_id=%s", signal_id)
             return []
             
+        # Nếu vị thế cục bộ đã đóng (CLOSED), không cần làm gì thêm
         if state.position_state == "CLOSED":
             self._logger.debug("sync_exchange: signal_id=%s is already CLOSED", signal_id)
             return []
 
-        # Resolve symbol with our robust helper
+        # Phân tích ký hiệu giao dịch (ví dụ: BTC/USDT) từ DB/lịch sử sự kiện/chính sách
         symbol = await self._resolve_symbol(signal_id, state, local_store)
         
         policies = state.policies or {}
-        market_type = policies.get("market_type") or policies.get("marketType") or self._config.exchange_default_type or "FUTURE"
+        market_type = (
+            state.market_type
+            or policies.get("market_type")
+            or policies.get("marketType")
+            or self._config.exchange_default_type
+            or "FUTURE"
+        )
         market_type = str(market_type).upper()
 
+        # Tìm kiếm ID lệnh của sàn (exchange order_id). Nếu sập trước khi lưu DB cục bộ,
+        # ta quét qua các sự kiện cũ để tìm order_id
         order_id = state.order_id
         if not order_id:
             events = await local_store.get_events_for_signal(signal_id, limit=50)
@@ -255,6 +286,8 @@ class CcxtSignalExecutor:
                     order_id = oid
                     break
 
+        # Do các hàm gọi API của thư viện CCXT là đồng bộ (blocking I/O) và có thể gây nghẽn
+        # toàn bộ Event Loop của Executor, ta đẩy tác vụ đồng bộ hóa này sang chạy trên Thread Pool.
         return await asyncio.to_thread(
             self._sync_exchange_sync,
             signal_id=signal_id,
@@ -402,7 +435,7 @@ class CcxtSignalExecutor:
 
         # 6. Live execution — Futures lifecycle + create_order
         try:
-            market_type = str(payload.get("market_type") or "SPOT").upper()
+            market_type = self._resolve_market_type(payload)
             exchange = self._get_exchange(market_type)
 
             if market_type == "FUTURE":
@@ -418,10 +451,12 @@ class CcxtSignalExecutor:
                 order.get("price"),
                 order.get("params") or {},
             )
-            return ExecutionResult(
-                mode="live",
-                order_id=str(created.get("id")) if isinstance(created, dict) else None,
-                details=created if isinstance(created, dict) else {"raw": created},
+            return self._finalize_live_entry_execution_sync(
+                exchange=exchange,
+                payload=payload,
+                order=order,
+                created=created,
+                market_type=market_type,
             )
 
         except Exception as exc:
@@ -488,6 +523,348 @@ class CcxtSignalExecutor:
 
     # ── Order building ─────────────────────────────────────────────────────
 
+    def _resolve_market_type(self, payload: dict[str, Any]) -> str:
+        market_type = (
+            payload.get("market_type")
+            or payload.get("marketType")
+            or self._config.exchange_default_type
+            or "SPOT"
+        )
+        return str(market_type).strip().upper()
+
+    def _finalize_live_entry_execution_sync(
+        self,
+        exchange: Any,
+        payload: dict[str, Any],
+        order: dict[str, Any],
+        created: Any,
+        market_type: str,
+    ) -> ExecutionResult:
+        entry_order = created if isinstance(created, dict) else {"raw": created}
+        entry_order_id = self._extract_order_id(entry_order)
+        symbol = order["symbol"]
+        action = str(payload.get("action", "")).strip().upper()
+        requested_amount = float(order.get("amount") or 0.0)
+        entry_order = self._confirm_entry_fill_sync(exchange, symbol, entry_order_id, entry_order)
+        filled_amount = self._extract_filled_amount(entry_order)
+        order_status = self._normalize_order_status(entry_order)
+        tp = _first_present(payload, "take_profit", "takeProfit", "tp")
+        sl = _first_present(payload, "stop_loss", "stopLoss", "sl")
+        tp_value = float(tp) if tp is not None else None
+        sl_value = float(sl) if sl is not None else None
+
+        details: dict[str, Any] = {
+            "entry_order": entry_order,
+            "entry_order_id": entry_order_id,
+            "market_type": market_type,
+            "action": action,
+            "requested_amount": requested_amount,
+            "filled_amount": filled_amount,
+            "take_profit": tp_value,
+            "stop_loss": sl_value,
+        }
+
+        warnings: list[str] = []
+        errors: list[str] = []
+
+        if not self._should_create_entry_protection(action, market_type, tp_value, sl_value):
+            if (tp_value is not None or sl_value is not None) and market_type != "FUTURE":
+                warnings.append(f"TP/SL was requested but protection creation is only enabled for FUTURE market_type, got {market_type}.")
+            execution_status = "ENTRY_FILLED" if filled_amount > 0 else "ENTRY_OPEN"
+            protection_status = "NONE"
+            if filled_amount <= 0 and order_status not in {"closed", "filled"}:
+                execution_status = "ENTRY_OPEN"
+                protection_status = "PENDING"
+                warnings.append("Entry order is not confirmed filled yet; TP/SL were not created.")
+            return ExecutionResult(
+                mode="live",
+                order_id=entry_order_id,
+                details=details,
+                entry_order_id=entry_order_id,
+                symbol=symbol,
+                market_type=market_type,
+                action=action,
+                requested_amount=requested_amount,
+                filled_amount=filled_amount,
+                take_profit=tp_value,
+                stop_loss=sl_value,
+                execution_status=execution_status,
+                protection_status=protection_status,
+                raw_orders={"entry": entry_order},
+                warnings=warnings or None,
+            )
+
+        if filled_amount <= 0:
+            warnings.append("Entry order is not confirmed filled yet; TP/SL were not created.")
+            return ExecutionResult(
+                mode="live",
+                order_id=entry_order_id,
+                details=details,
+                entry_order_id=entry_order_id,
+                symbol=symbol,
+                market_type=market_type,
+                action=action,
+                requested_amount=requested_amount,
+                filled_amount=filled_amount,
+                take_profit=tp_value,
+                stop_loss=sl_value,
+                execution_status="ENTRY_OPEN",
+                protection_status="PENDING",
+                raw_orders={"entry": entry_order},
+                warnings=warnings,
+            )
+
+        protection_orders: dict[str, Any] = {"entry": entry_order}
+        sl_order: dict[str, Any] | None = None
+        tp_order: dict[str, Any] | None = None
+
+        if sl_value is not None:
+            sl_order, sl_error = self._create_protective_order_sync(
+                exchange=exchange,
+                payload=payload,
+                entry_side=str(order.get("side") or entry_order.get("side") or "buy"),
+                filled_amount=filled_amount,
+                role="stop_loss",
+                trigger_price=sl_value,
+                market_type=market_type,
+            )
+            if sl_error is not None:
+                errors.append(f"Stop-loss protection failed: {sl_error}")
+                details["protection_status"] = "ENTRY_FILLED_UNPROTECTED"
+                protection_orders["stop_loss"] = None
+                return ExecutionResult(
+                    mode="live",
+                    order_id=entry_order_id,
+                    details=details,
+                    errors=errors,
+                    entry_order_id=entry_order_id,
+                    symbol=symbol,
+                    market_type=market_type,
+                    action=action,
+                    requested_amount=requested_amount,
+                    filled_amount=filled_amount,
+                    take_profit=tp_value,
+                    stop_loss=sl_value,
+                    execution_status="ENTRY_FILLED_UNPROTECTED",
+                    protection_status="UNPROTECTED",
+                    raw_orders=protection_orders,
+                    warnings=warnings or None,
+                )
+            protection_orders["stop_loss"] = sl_order
+
+        if tp_value is not None:
+            tp_order, tp_error = self._create_protective_order_sync(
+                exchange=exchange,
+                payload=payload,
+                entry_side=str(order.get("side") or entry_order.get("side") or "buy"),
+                filled_amount=filled_amount,
+                role="take_profit",
+                trigger_price=tp_value,
+                market_type=market_type,
+            )
+            if tp_error is not None:
+                errors.append(f"Take-profit protection failed: {tp_error}")
+                protection_orders["take_profit"] = None
+                execution_status = "PARTIALLY_PROTECTED" if sl_order is not None else "ENTRY_FILLED_UNPROTECTED"
+                protection_status = "PARTIALLY_PROTECTED" if sl_order is not None else "UNPROTECTED"
+                return ExecutionResult(
+                    mode="live",
+                    order_id=entry_order_id,
+                    details=details,
+                    errors=errors,
+                    entry_order_id=entry_order_id,
+                    symbol=symbol,
+                    market_type=market_type,
+                    action=action,
+                    requested_amount=requested_amount,
+                    filled_amount=filled_amount,
+                    take_profit=tp_value,
+                    stop_loss=sl_value,
+                    execution_status=execution_status,
+                    protection_status=protection_status,
+                    raw_orders=protection_orders,
+                    warnings=warnings or None,
+                )
+            protection_orders["take_profit"] = tp_order
+
+        details["protection_status"] = "PROTECTED"
+        return ExecutionResult(
+            mode="live",
+            order_id=entry_order_id,
+            details=details,
+            entry_order_id=entry_order_id,
+            tp_order_id=self._extract_order_id(tp_order) if tp_order else None,
+            sl_order_id=self._extract_order_id(sl_order) if sl_order else None,
+            symbol=symbol,
+            market_type=market_type,
+            action=action,
+            requested_amount=requested_amount,
+            filled_amount=filled_amount,
+            take_profit=tp_value,
+            stop_loss=sl_value,
+            execution_status="PROTECTED",
+            protection_status="PROTECTED",
+            raw_orders=protection_orders,
+            warnings=warnings or None,
+        )
+
+    def _confirm_entry_fill_sync(
+        self,
+        exchange: Any,
+        symbol: str,
+        entry_order_id: str | None,
+        entry_order: dict[str, Any],
+    ) -> dict[str, Any]:
+        current = dict(entry_order)
+        if self._extract_filled_amount(current) > 0:
+            return current
+        if self._normalize_order_status(current) in {"closed", "filled"}:
+            return current
+        if not entry_order_id:
+            return current
+
+        for attempt in range(_ENTRY_FILL_CONFIRM_RETRIES):
+            try:
+                time.sleep(_ENTRY_FILL_CONFIRM_DELAY_SECONDS)
+                fetched = exchange.fetch_order(entry_order_id, symbol)
+                if isinstance(fetched, dict):
+                    current = fetched
+                    if self._extract_filled_amount(current) > 0:
+                        return current
+                    if self._normalize_order_status(current) in {"closed", "filled"}:
+                        return current
+            except Exception as exc:
+                self._logger.debug(
+                    "Entry fill confirmation attempt failed attempt=%d order_id=%s symbol=%s error=%s",
+                    attempt + 1,
+                    entry_order_id,
+                    symbol,
+                    exc,
+                )
+        return current
+
+    def _create_protective_order_sync(
+        self,
+        exchange: Any,
+        payload: dict[str, Any],
+        entry_side: str,
+        filled_amount: float,
+        role: str,
+        trigger_price: float,
+        market_type: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if market_type != "FUTURE":
+            return None, f"TP/SL order creation is not enabled for market_type={market_type}"
+
+        signal_id = str(payload.get("signal_id") or "")
+        if not signal_id:
+            return None, "Signal is missing signal_id"
+
+        order_side = "sell" if entry_side.lower() == "buy" else "buy"
+        order_type = "STOP_MARKET" if role == "stop_loss" else "TAKE_PROFIT_MARKET"
+        client_order_id = self._build_signal_client_order_id(signal_id, "sl" if role == "stop_loss" else "tp")
+        params: dict[str, Any] = {
+            "triggerPrice": float(trigger_price),
+            "reduceOnly": True,
+            "clientOrderId": client_order_id,
+        }
+
+        last_error: str | None = None
+        symbol = self._normalize_symbol(
+            payload.get("symbol") or payload.get("asset_pair") or payload.get("assetPair")
+        )
+        if not symbol:
+            return None, "Signal is missing symbol"
+        for attempt in range(_PROTECTION_CREATE_RETRIES):
+            try:
+                created = exchange.create_order(
+                    symbol,
+                    order_type,
+                    order_side,
+                    filled_amount,
+                    None,
+                    params,
+                )
+                if isinstance(created, dict):
+                    return created, None
+                return {"raw": created, "clientOrderId": client_order_id}, None
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt + 1 < _PROTECTION_CREATE_RETRIES:
+                    time.sleep(_PROTECTION_CREATE_DELAY_SECONDS * (attempt + 1))
+
+        return None, last_error or "Unknown protection order failure"
+
+    def _extract_order_id(self, order: dict[str, Any]) -> str | None:
+        for key in ("id", "orderId", "algoId", "clientOrderId"):
+            value = order.get(key)
+            if value not in (None, ""):
+                return str(value)
+        info = order.get("info")
+        if isinstance(info, dict):
+            for key in ("orderId", "algoId", "clientOrderId"):
+                value = info.get(key)
+                if value not in (None, ""):
+                    return str(value)
+        return None
+
+    def _extract_filled_amount(self, order: dict[str, Any]) -> float:
+        for key in ("filled", "executedQty", "cumQty", "filledAmount"):
+            value = order.get(key)
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    pass
+        info = order.get("info")
+        if isinstance(info, dict):
+            for key in ("filled", "executedQty", "cumQty"):
+                value = info.get(key)
+                if value not in (None, ""):
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        pass
+        return 0.0
+
+    def _normalize_order_status(self, order: dict[str, Any]) -> str:
+        status = order.get("status")
+        if status in (None, ""):
+            info = order.get("info")
+            if isinstance(info, dict):
+                status = info.get("status")
+        return str(status).strip().lower() if status not in (None, "") else ""
+
+    def _build_signal_client_order_id(self, signal_id: str, suffix: str) -> str:
+        raw = f"{signal_id}-{suffix}"
+        if len(raw) <= _CLIENT_ORDER_ID_MAX_LEN:
+            return raw
+
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+        prefix = signal_id[:16]
+        compact = f"{prefix}-{suffix[:4]}-{digest}"
+        return compact[:_CLIENT_ORDER_ID_MAX_LEN]
+
+    def _entry_client_order_id_matches_signal(self, client_order_id: Any, signal_id: str | None) -> bool:
+        if not signal_id or client_order_id in (None, ""):
+            return False
+        candidate = str(client_order_id)
+        return candidate in {
+            str(signal_id),
+            self._build_signal_client_order_id(str(signal_id), "entry"),
+        }
+
+    def _should_create_entry_protection(
+        self,
+        action: str,
+        market_type: str,
+        take_profit: float | None,
+        stop_loss: float | None,
+    ) -> bool:
+        return action in {"OPEN_LONG", "OPEN_SHORT"} and market_type == "FUTURE" and (
+            take_profit is not None or stop_loss is not None
+        )
+
     def _build_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action", "")).strip().upper()
         action = _ACTION_ALIASES.get(action, action)
@@ -531,10 +908,10 @@ class CcxtSignalExecutor:
 
         params: dict[str, Any] = {}
 
-        # Idempotency link: clientOrderId → signal_id in exchange records
+        # Idempotency link: stable clientOrderId per signal role.
         signal_id = payload.get("signal_id")
         if signal_id:
-            params["clientOrderId"] = str(signal_id)
+            params["clientOrderId"] = self._build_signal_client_order_id(str(signal_id), "entry")
 
         if reduce_only:
             params["reduceOnly"] = True
@@ -574,7 +951,7 @@ class CcxtSignalExecutor:
 
         signal_id = payload.get("signal_id")
         if signal_id:
-            params["clientOrderId"] = str(signal_id)
+            params["clientOrderId"] = self._build_signal_client_order_id(str(signal_id), "update")
 
         return {
             "symbol": symbol,
@@ -937,7 +1314,7 @@ class CcxtSignalExecutor:
         exchange = self._get_exchange(market_type)
         
         order = None
-        # 1. Fetch order details if order_id is present
+        # 1. Truy vấn thông tin lệnh trực tiếp từ sàn bằng order_id nếu có
         if order_id:
             try:
                 order = exchange.fetch_order(order_id, symbol)
@@ -947,7 +1324,9 @@ class CcxtSignalExecutor:
                     order_id, symbol, e
                 )
                 
-        # 2. If order not found, search exchange orders by clientOrderId (signal_id)
+        # 2. Nếu không tìm thấy hoặc sập trước khi ghi nhận order_id cục bộ:
+        # Sử dụng signal_id làm clientOrderId để tìm kiếm lệnh trên sàn.
+        # (Tại bước đặt lệnh, Executor luôn đính kèm 'clientOrderId': signal_id để đảm bảo tính khả trùng)
         if not order:
             try:
                 all_orders = []
@@ -968,9 +1347,10 @@ class CcxtSignalExecutor:
                         except Exception:
                             pass
                 
+                # Quét danh sách lệnh trên sàn để tìm lệnh có clientOrderId khớp với signal_id cục bộ
                 for ord_item in all_orders:
                     client_order_id = ord_item.get("clientOrderId") or ord_item.get("info", {}).get("clientOrderId")
-                    if client_order_id == signal_id or ord_item.get("id") == order_id:
+                    if self._entry_client_order_id_matches_signal(client_order_id, signal_id) or ord_item.get("id") == order_id:
                         order = ord_item
                         break
             except Exception as e:
@@ -979,7 +1359,8 @@ class CcxtSignalExecutor:
                     symbol, e
                 )
                 
-        # 3. Determine order fill status and generate events
+        # 3. Phân tích trạng thái lệnh trên sàn và sinh các sự kiện giả lập (Synthetic Events)
+        # để cập nhật máy trạng thái (State Machine) cục bộ.
         order_state = state.order_state
         order_filled = False
         
@@ -987,17 +1368,21 @@ class CcxtSignalExecutor:
             ccxt_status = order.get("status")  # open, closed, canceled, rejected
             resolved_order_id = order.get("id") or order_id or signal_id
             
+            # Kịch bản A: Lệnh vẫn đang treo trên sàn (open)
             if ccxt_status == "open":
                 if order_state == "NONE":
+                    # Local chưa biết lệnh đã đặt -> Đưa local lên trạng thái PLACED
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.ORDER_PLACED,
                         {"order_id": resolved_order_id, "symbol": symbol}
                     ))
+            # Kịch bản B: Lệnh đã khớp hoàn toàn trên sàn (closed)
             elif ccxt_status == "closed":
                 order_filled = True
                 fill_price = order.get("price") or order.get("average") or 0.0
                 if order_state == "NONE":
+                    # Local chưa lưu gì -> Cho chuyển tiếp: NONE -> PLACED -> FILLED
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.ORDER_PLACED,
@@ -1009,13 +1394,16 @@ class CcxtSignalExecutor:
                         {"order_id": resolved_order_id, "symbol": symbol, "fill_price": fill_price}
                     ))
                 elif order_state == "PLACED":
+                    # Local đã biết lệnh được đặt -> Chỉ cần đẩy lên FILLED
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.ORDER_FILLED,
                         {"order_id": resolved_order_id, "symbol": symbol, "fill_price": fill_price}
                     ))
+            # Kịch bản C: Lệnh bị hủy (canceled / expired)
             elif ccxt_status in ("canceled", "expired"):
                 if order_state == "NONE":
+                    # Cho chuyển tiếp: NONE -> PLACED -> CANCELED
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.ORDER_PLACED,
@@ -1027,11 +1415,13 @@ class CcxtSignalExecutor:
                         {"order_id": resolved_order_id, "symbol": symbol}
                     ))
                 elif order_state == "PLACED":
+                    # Đẩy từ PLACED -> CANCELED
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.ORDER_CANCELED,
                         {"order_id": resolved_order_id, "symbol": symbol}
                     ))
+            # Kịch bản D: Lệnh bị sàn từ chối (rejected)
             elif ccxt_status == "rejected":
                 if order_state == "NONE":
                     events.append(self._create_synthetic_event(
@@ -1051,12 +1441,13 @@ class CcxtSignalExecutor:
                         {"order_id": resolved_order_id, "symbol": symbol, "error": "Order rejected by exchange"}
                     ))
         
-        # 4. Position state logic
+        # 4. Đối chiếu trạng thái vị thế (Position) thực tế trên sàn
         position_state = state.position_state
         
         if market_type == "FUTURE":
             pos_size = 0.0
             try:
+                # Lấy toàn bộ vị thế hiện tại của symbol này trên sàn
                 if hasattr(exchange, "fetch_positions"):
                     positions = exchange.fetch_positions([symbol])
                     for pos in positions:
@@ -1071,7 +1462,9 @@ class CcxtSignalExecutor:
                 
             is_position_open = pos_size > 0.0
             
+            # Kịch bản A: Sàn đang mở vị thế (vị thế tồn tại thực tế)
             if is_position_open:
+                # Nếu local chưa kịp ghi nhận lệnh khớp -> Đồng bộ bắt buộc lên FILLED trước
                 if not order_filled and order_state not in ("FILLED",):
                     resolved_order_id = (order.get("id") if order else None) or order_id or signal_id
                     if order_state == "NONE":
@@ -1087,19 +1480,24 @@ class CcxtSignalExecutor:
                     ))
                     order_filled = True
                 
+                # Nếu cục bộ chưa biết vị thế đã mở -> Sinh sự kiện mở vị thế
                 if position_state == "NONE":
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.POSITION_OPENED,
                         {"position_size": pos_size, "symbol": symbol}
                     ))
+            # Kịch bản B: Sàn không có vị thế mở (vị thế đã đóng hoặc chưa mở)
             else:
+                # Nếu cục bộ đang hiểu là vị thế đang mở -> Đồng bộ đóng vị thế
                 if position_state in ("OPENED", "UPDATING"):
                     events.append(self._create_synthetic_event(
                         signal_id,
                         ExecutionEventType.POSITION_CLOSED,
                         {"symbol": symbol}
                     ))
+                # Nếu cục bộ hiểu là NONE nhưng thực tế lệnh đã khớp trên sàn
+                # (nghĩa là vị thế đã được mở và đóng/hủy xong xuôi trước khi khôi phục)
                 elif position_state == "NONE":
                     if order_filled or (order and order.get("status") == "closed"):
                         if not order_filled and order_state not in ("FILLED",):
@@ -1112,9 +1510,10 @@ class CcxtSignalExecutor:
                                 ))
                             events.append(self._create_synthetic_event(
                                 signal_id,
-                                ExecutionEventType.ORDER_FILLED,
+                                    ExecutionEventType.ORDER_FILLED,
                                 {"order_id": resolved_order_id, "symbol": symbol}
                             ))
+                        # Sinh cả chuỗi OPENED -> CLOSED để đưa local state về đích an toàn
                         events.append(self._create_synthetic_event(
                             signal_id,
                             ExecutionEventType.POSITION_OPENED,
@@ -1126,7 +1525,9 @@ class CcxtSignalExecutor:
                             {"symbol": symbol}
                         ))
         
+        # 5. Đối chiếu trạng thái cho tài khoản SPOT
         elif market_type == "SPOT":
+            # Giao dịch Spot khớp lệnh là mua đứt bán đoạn ngay lập tức
             if order_filled or (order and order.get("status") == "closed"):
                 if position_state == "NONE":
                     events.append(self._create_synthetic_event(

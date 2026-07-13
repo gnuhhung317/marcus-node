@@ -51,6 +51,14 @@ class SignalState:
     policies: dict[str, Any] | None = None
     order_id: str | None = None
     order_symbol: str | None = None
+    market_type: str | None = None
+    action: str | None = None
+    filled_amount: float | None = None
+    tp_order_id: str | None = None
+    sl_order_id: str | None = None
+    take_profit: float | None = None
+    stop_loss: float | None = None
+    protection_status: str | None = None
 
 
 class LocalExecutionStore:
@@ -101,6 +109,14 @@ class LocalExecutionStore:
                 policies TEXT,
                 order_id TEXT,
                 order_symbol TEXT,
+                market_type TEXT,
+                action TEXT,
+                filled_amount REAL,
+                tp_order_id TEXT,
+                sl_order_id TEXT,
+                take_profit REAL,
+                stop_loss REAL,
+                protection_status TEXT,
                 signal_id TEXT NOT NULL UNIQUE,
                 signal_state TEXT NOT NULL DEFAULT 'ACCEPTED',
                 order_state TEXT NOT NULL DEFAULT 'NONE',
@@ -171,9 +187,22 @@ class LocalExecutionStore:
         cursor.execute("PRAGMA table_info(execution_signals)")
         existing_columns = {row[1] for row in cursor.fetchall()}
 
-        for column_name in ("policies", "order_id", "order_symbol"):
+        column_definitions = {
+            "policies": "TEXT",
+            "order_id": "TEXT",
+            "order_symbol": "TEXT",
+            "market_type": "TEXT",
+            "action": "TEXT",
+            "filled_amount": "REAL",
+            "tp_order_id": "TEXT",
+            "sl_order_id": "TEXT",
+            "take_profit": "REAL",
+            "stop_loss": "REAL",
+            "protection_status": "TEXT",
+        }
+        for column_name, column_type in column_definitions.items():
             if column_name not in existing_columns:
-                cursor.execute(f"ALTER TABLE execution_signals ADD COLUMN {column_name} TEXT")
+                cursor.execute(f"ALTER TABLE execution_signals ADD COLUMN {column_name} {column_type}")
 
         self._conn.commit()
 
@@ -288,6 +317,14 @@ class LocalExecutionStore:
         policies: dict[str, Any] | None = None,
         order_id: str | None = None,
         order_symbol: str | None = None,
+        market_type: str | None = None,
+        action: str | None = None,
+        filled_amount: float | None = None,
+        tp_order_id: str | None = None,
+        sl_order_id: str | None = None,
+        take_profit: float | None = None,
+        stop_loss: float | None = None,
+        protection_status: str | None = None,
     ) -> SignalState:
         """Update signal state fields."""
         async with self._lock:
@@ -324,6 +361,30 @@ class LocalExecutionStore:
             if order_symbol is not None:
                 updates.append("order_symbol = ?")
                 params.append(order_symbol)
+            if market_type is not None:
+                updates.append("market_type = ?")
+                params.append(market_type)
+            if action is not None:
+                updates.append("action = ?")
+                params.append(action)
+            if filled_amount is not None:
+                updates.append("filled_amount = ?")
+                params.append(filled_amount)
+            if tp_order_id is not None:
+                updates.append("tp_order_id = ?")
+                params.append(tp_order_id)
+            if sl_order_id is not None:
+                updates.append("sl_order_id = ?")
+                params.append(sl_order_id)
+            if take_profit is not None:
+                updates.append("take_profit = ?")
+                params.append(take_profit)
+            if stop_loss is not None:
+                updates.append("stop_loss = ?")
+                params.append(stop_loss)
+            if protection_status is not None:
+                updates.append("protection_status = ?")
+                params.append(protection_status)
             
             params.append(signal_id)
             
@@ -549,6 +610,14 @@ class LocalExecutionStore:
             policies=_deserialize_payload(row["policies"]) if "policies" in row_keys and row["policies"] else None,
             order_id=row["order_id"] if "order_id" in row_keys else None,
             order_symbol=row["order_symbol"] if "order_symbol" in row_keys else None,
+            market_type=row["market_type"] if "market_type" in row_keys else None,
+            action=row["action"] if "action" in row_keys else None,
+            filled_amount=_safe_float(row["filled_amount"]) if "filled_amount" in row_keys else None,
+            tp_order_id=row["tp_order_id"] if "tp_order_id" in row_keys else None,
+            sl_order_id=row["sl_order_id"] if "sl_order_id" in row_keys else None,
+            take_profit=_safe_float(row["take_profit"]) if "take_profit" in row_keys else None,
+            stop_loss=_safe_float(row["stop_loss"]) if "stop_loss" in row_keys else None,
+            protection_status=row["protection_status"] if "protection_status" in row_keys else None,
         )
 
     def _row_to_event(self, row: sqlite3.Row) -> ExecutionEvent:
@@ -610,4 +679,13 @@ def _parse_datetime(value: str | None) -> datetime | None:
             return datetime.fromisoformat(value)
         return None
     except (ValueError, AttributeError):
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None

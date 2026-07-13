@@ -177,27 +177,56 @@ class LocalExecutorEngine:
         # --- Update local state ---
         if signal_id and self._local_store is not None:
             if result.mode != "error":
-                # Mark as OPEN — downstream execution events will close it
                 await self._local_store.get_or_create_signal(signal_id)
-                # Persist order id / symbol when present
-                order_symbol = None
-                try:
-                    built = self._executor._build_order(payload)
-                    order_symbol = built.get("symbol")
-                except Exception:
-                    order_symbol = None
+                order_symbol = result.symbol or payload.get("symbol") or payload.get("asset_pair") or payload.get("assetPair")
+                market_type = result.market_type or payload.get("market_type") or payload.get("marketType") or self._config.exchange_default_type
+                order_id = result.entry_order_id or result.order_id
+                filled_amount = result.filled_amount if result.filled_amount is not None else 0.0
+                order_state = "FILLED" if filled_amount > 0 else "PLACED"
+                position_state = "OPENED" if filled_amount > 0 else "NONE"
 
                 await self._local_store.update_signal_state(
                     signal_id,
                     signal_state="OPEN",
+                    order_state=order_state,
+                    position_state=position_state,
                     policies=payload.get("policies"),
-                    order_id=result.order_id,
+                    order_id=order_id,
                     order_symbol=order_symbol,
+                    market_type=market_type,
+                    action=result.action or payload.get("action"),
+                    filled_amount=result.filled_amount,
+                    tp_order_id=result.tp_order_id,
+                    sl_order_id=result.sl_order_id,
+                    take_profit=result.take_profit,
+                    stop_loss=result.stop_loss,
+                    protection_status=result.protection_status,
                 )
+                if result.execution_status in {"ENTRY_FILLED_UNPROTECTED", "PARTIALLY_PROTECTED"}:
+                    await self._notify(
+                        "Protection warning",
+                        bot_id=self._config.bot_id,
+                        signal_id=signal_id,
+                        action=action,
+                        symbol=order_symbol or symbol,
+                        mode=result.mode,
+                        execution_status=result.execution_status,
+                        protection_status=result.protection_status,
+                        entry_order_id=order_id,
+                        tp_order_id=result.tp_order_id,
+                        sl_order_id=result.sl_order_id,
+                        warnings="; ".join(result.warnings or []) if result.warnings else None,
+                    )
             else:
                 # Record the signal but mark as REJECTED so dedup still protects
                 await self._local_store.get_or_create_signal(signal_id)
-                await self._local_store.update_signal_state(signal_id, signal_state="REJECTED", policies=payload.get("policies"))
+                await self._local_store.update_signal_state(
+                    signal_id,
+                    signal_state="REJECTED",
+                    policies=payload.get("policies"),
+                    market_type=result.market_type or payload.get("market_type") or payload.get("marketType") or self._config.exchange_default_type,
+                    action=result.action or payload.get("action"),
+                )
 
     async def _deadline_sweeper_loop(self, stop_event: asyncio.Event) -> None:
         """Periodic sweeper that enforces cancel/close deadlines recorded in signal policies."""
