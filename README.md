@@ -27,7 +27,7 @@ The executor processes signal payloads with the following schema:
 |-------|------|-------------|---------|
 | `signal_id` | string | Unique signal identifier | `"sig-20260407-001"` |
 | `action` | string | Trading action | `"OPEN_LONG"` |
-| `symbol` | string | Trading pair (base or base/quote format) | `"BTCUSDT"` or `"BTC/USDT"` |
+| `symbol` | string | Trading pair. Backend publishes canonical `BTCUSDT`; executor also accepts compatibility inputs like `BTC/USDT` | `"BTCUSDT"` |
 
 ### Optional Fields
 
@@ -36,8 +36,11 @@ The executor processes signal payloads with the following schema:
 | `amount` / `quantity` / `size` | float | Order amount (coins to trade) | `0.5` |
 | `order_type` | string | Order type: `"market"` or `"limit"` | `"market"` |
 | `price` / `limit_price` / `limitPrice` | float | Limit order price (required if `order_type="limit"`) | `65000.50` |
+| `take_profit` / `takeProfit` / `tp` | float | Optional take-profit price for `OPEN_LONG` / `OPEN_SHORT` futures entries | `71000` |
+| `stop_loss` / `stopLoss` / `sl` | float | Optional stop-loss price for `OPEN_LONG` / `OPEN_SHORT` futures entries | `64000` |
 | `time_in_force` | string | Time in force: `"GTC"`, `"IOC"`, `"FOK"`, etc. | `"GTC"` |
 | `asset_pair` / `assetPair` | string | Alternative symbol field | `"ETHUSDT"` |
+| `policies` | object | Optional execution controls such as `maxSizePercent`, `cancelOrderAfter`, and `closePositionAfter` | `{"maxSizePercent": 0.1}` |
 | `metadata` | object | Additional context | `{"strategy": "sma"}` |
 
 ### Valid Actions
@@ -46,14 +49,12 @@ The executor processes signal payloads with the following schema:
 - `CLOSE_LONG` - Close long position (sell, reduce_only=true)
 - `OPEN_SHORT` - Open short position (sell)
 - `CLOSE_SHORT` - Close short position (buy, reduce_only=true)
-- `BUY` - Alias for OPEN_LONG
-- `SELL` - Alias for CLOSE_LONG
-- `SELL_SHORT` - Alias for OPEN_SHORT
-- `BUY_TO_COVER` - Alias for CLOSE_SHORT
+- `UPDATE_TP_SL` - Update existing protective TP/SL orders for an open position
+- `BUY`, `SELL`, `SELL_SHORT`, `BUY_TO_COVER` - executor-local compatibility aliases, not part of the backend transport contract
 
 ### Symbol Normalization
 
-The executor normalizes symbols to CCXT format (`BASE/QUOTE`):
+The backend publishes `BTCUSDT` as the canonical wire symbol. The executor normalizes accepted inputs to CCXT format (`BASE/QUOTE`) internally:
 
 ```
 BTCUSDT     → BTC/USDT
@@ -81,7 +82,9 @@ Supported quote currencies: USDT, USDC, BUSD
   "signal_id": "sig-002",
   "action": "OPEN_LONG",
   "symbol": "BTCUSDT",
-  "amount": 0.5
+  "amount": 0.5,
+  "take_profit": 71000,
+  "stop_loss": 64000
 }
 ```
 
@@ -105,6 +108,21 @@ Supported quote currencies: USDT, USDC, BUSD
   "action": "CLOSE_LONG",
   "symbol": "BTCUSDT",
   "amount": 0.5
+}
+```
+
+**Update TP/SL (canonical backend action):**
+```json
+{
+  "signal_id": "sig-005",
+  "action": "UPDATE_TP_SL",
+  "symbol": "BTCUSDT",
+  "take_profit": 71000,
+  "stop_loss": 64000,
+  "policies": {
+    "cancelOrderAfter": 1711976400,
+    "closePositionAfter": 1711978200
+  }
 }
 ```
 
@@ -184,12 +202,13 @@ as a completed delivery path when the Binance sandbox rejects the credential
 or order, and prints the executor error for diagnosis.
 
 ## Append-Only Binance Replay
-Use the append-only replay runner when you want to read fresh Binance data and
-seed only new trade lifecycle events and portfolio snapshots for the demo
-trader without rebuilding existing history.
+Use the hybrid replay runner when you want to rebase the balance/equity path
+from the cloud dashboard and seed Binance trade lifecycle events without
+rebuilding existing history.
 
 ```bash
-python scripts/append_binance_replay.py --yes --trader-email demo-trader@gmail.com
+python scripts/append_binance_replay.py --mode repair-window --yes --trader-email demo-trader@gmail.com
+python scripts/append_binance_replay.py --mode append --yes --trader-email demo-trader@gmail.com
 ```
 
 Required environment variables:
@@ -200,6 +219,8 @@ Optional overrides:
 - `EXCHANGE_ID` for non-Binance CCXT exchanges
 - `EXCHANGE_SANDBOX=true` for sandbox/demo mode
 - `APPEND_BOOTSTRAP_DAYS` and `APPEND_OVERLAP_DAYS` for trade lookback tuning
+- `--dashboard-start` and `--dashboard-end` for a manual replay window
+- `--state-file` to override the scoped replay checkpoint path
 
 ## Execution Mode
 Set `EXECUTION_MODE` to `dry-run` for safe logging, or `live` to place orders via CCXT.

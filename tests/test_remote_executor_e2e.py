@@ -21,24 +21,17 @@ def e2e_script():
     return module
 
 
-def test_validate_state_requires_runtime_credentials(e2e_script):
-    e2e_script.validate_state(
-        {
-            "bot_id": "bot-1",
-            "bot_api_key": "ak-1",
-            "bot_signer_secret": "sk-1",
-            "ws_token": "ws-1",
-        }
-    )
+def test_validate_state_requires_runtime_credentials(e2e_script, monkeypatch):
+    monkeypatch.setenv("BOT_ID", "bot-1")
+    monkeypatch.setenv("BOT_API_KEY", "ak-1")
+    monkeypatch.setenv("BOT_SIGNER_SECRET", "sk-1")
+    monkeypatch.setenv("WS_TOKEN", "ws-1")
 
-    with pytest.raises(RuntimeError, match="bot_signer_secret"):
-        e2e_script.validate_state(
-            {
-                "bot_id": "bot-1",
-                "bot_api_key": "ak-1",
-                "ws_token": "ws-1",
-            }
-        )
+    e2e_script.validate_state()
+
+    monkeypatch.delenv("BOT_SIGNER_SECRET")
+    with pytest.raises(RuntimeError, match="BOT_SIGNER_SECRET"):
+        e2e_script.validate_state()
 
 
 def test_signal_payload_uses_backend_required_fields(e2e_script):
@@ -59,6 +52,8 @@ def test_signal_payload_uses_backend_required_fields(e2e_script):
     assert payload["orderType"] == "MARKET"
     assert payload["action"] == "OPEN_SHORT"
     assert payload["entry"] == 76823.7
+    assert payload["takeProfit"] == pytest.approx(76055.463)
+    assert payload["stopLoss"] == pytest.approx(77591.937)
     assert payload["generatedTimestamp"]
 
 

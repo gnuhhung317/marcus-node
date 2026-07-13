@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Remote end-to-end runner for the Marcus local executor.
 
-The runner intentionally reads exchange credentials from environment variables
-only. It never writes them to the provisioning state file and redacts configured
-secret values from child-process logs.
+The runner intentionally reads credentials from environment variables / actor .env
+files only. It never provisions accounts itself — supply the developer .env
+(demo/state/dev/.env) and trader .env (demo/state/trader/.env) with credentials
+you created via the backend UI.
+
+Exchange credentials must come from the --env-file (e.g. demo/.env.local).
 """
 from __future__ import annotations
 
@@ -20,26 +23,25 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from dataclasses import dataclass
+import queue
 
 import websockets
 import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_STATE_FILE = ROOT / "scripts" / ".e2e_provision_state.json"
+DEFAULT_DEV_ENV_FILE = ROOT / "demo" / "state" / "dev" / ".env"
+DEFAULT_TRADER_ENV_FILE = ROOT / "demo" / "state" / "trader" / ".env"
 DEFAULT_DB_PATH = ROOT / "scripts" / ".e2e_executor_state.db"
-PROVISION_SCRIPT = ROOT / "scripts" / "end2end_provision_and_connect.py"
 EXECUTOR_SCRIPT = ROOT / "local_executor.py"
 
-REQUIRED_STATE_KEYS = ("bot_id", "bot_api_key", "bot_signer_secret", "ws_token")
+REQUIRED_DEV_KEYS = ("BOT_ID", "BOT_API_KEY", "BOT_SIGNER_SECRET")
+REQUIRED_TRADER_KEYS = ("WS_TOKEN",)
 EXCHANGE_SECRET_ENV_KEYS = ("EXCHANGE_API_KEY", "EXCHANGE_API_SECRET", "EXCHANGE_API_PASSPHRASE")
 
 
@@ -97,8 +99,11 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.env_file:
         load_env_file(Path(args.env_file))
+    if args.dev_env_file:
+        load_env_file(Path(args.dev_env_file))
+    if args.trader_env_file:
+        load_env_file(Path(args.trader_env_file))
 
-    state_file = Path(args.state_file)
     db_path = Path(args.executor_db_path)
 
     if db_path.exists():
@@ -108,15 +113,17 @@ def main() -> None:
         if sidecar.exists():
             sidecar.unlink()
 
-    if not args.skip_provision:
-        run_provisioning(args, state_file)
+    validate_state()
 
-    state = load_state(state_file)
-    validate_state(state)
+    bot_id = os.environ["BOT_ID"]
+    ws_token = os.environ["WS_TOKEN"]
+    bot_api_key = os.environ["BOT_API_KEY"]
+    bot_signer_secret = os.environ["BOT_SIGNER_SECRET"]
+    base_url = os.environ.get("BASE_URL") or args.base_url
 
-    asyncio.run(probe_handshake(args.ws_url, state["bot_id"], state["ws_token"], args.ws_timeout_seconds))
+    asyncio.run(probe_handshake(args.ws_url, bot_id, ws_token, args.ws_timeout_seconds))
     if args.probe_only:
-        print("Probe-only mode completed after provisioning and websocket handshake.")
+        print("Probe-only mode completed after websocket handshake.")
         return
 
     executor_process: subprocess.Popen[str] | None = None
@@ -125,7 +132,7 @@ def main() -> None:
 
     try:
         if not args.skip_executor:
-            executor_process, log_reader = start_executor(args, state, db_path)
+            executor_process, log_reader = start_executor(args, db_path)
             connected = log_reader.wait_for_any(
                 ("Handshake acknowledged", "Connected to system WebSocket"),
                 args.executor_start_timeout_seconds,
@@ -134,7 +141,7 @@ def main() -> None:
                 raise RuntimeError("executor did not complete websocket handshake before timeout")
 
         payload = build_signal_payload(
-            bot_id=state["bot_id"],
+            bot_id=bot_id,
             signal_id=signal_id,
             amount=args.amount,
             symbol=args.symbol,
@@ -145,9 +152,9 @@ def main() -> None:
         )
         print(f"Publishing signed signal signal_id={signal_id} symbol={args.symbol} amount={args.amount}")
         send_result = send_signed_json(
-            url=f"{args.base_url.rstrip('/')}/api/v1/signals",
-            api_key=state["bot_api_key"],
-            signer_secret=state["bot_signer_secret"],
+            url=f"{base_url.rstrip('/')}/api/v1/signals",
+            api_key=bot_api_key,
+            signer_secret=bot_signer_secret,
             payload=payload,
             timeout_seconds=args.http_timeout_seconds,
         )
@@ -155,9 +162,9 @@ def main() -> None:
 
         if not args.skip_idempotency:
             duplicate = send_signed_json(
-                url=f"{args.base_url.rstrip('/')}/api/v1/signals",
-                api_key=state["bot_api_key"],
-                signer_secret=state["bot_signer_secret"],
+                url=f"{base_url.rstrip('/')}/api/v1/signals",
+                api_key=bot_api_key,
+                signer_secret=bot_signer_secret,
                 payload=payload,
                 timeout_seconds=args.http_timeout_seconds,
             )
@@ -166,16 +173,16 @@ def main() -> None:
         if not args.skip_invalid_payload:
             invalid_payload = {
                 "signalId": "",
-                "botId": state["bot_id"],
+                "botId": bot_id,
                 "symbol": args.symbol,
                 "action": "OPEN_LONG",
                 "orderType": "MARKET",
                 "generatedTimestamp": generated_timestamp(),
             }
             invalid = send_signed_json(
-                url=f"{args.base_url.rstrip('/')}/api/v1/signals",
-                api_key=state["bot_api_key"],
-                signer_secret=state["bot_signer_secret"],
+                url=f"{base_url.rstrip('/')}/api/v1/signals",
+                api_key=bot_api_key,
+                signer_secret=bot_signer_secret,
                 payload=invalid_payload,
                 timeout_seconds=args.http_timeout_seconds,
             )
@@ -183,7 +190,7 @@ def main() -> None:
 
         if not args.skip_backend_poll:
             backend_signal = poll_backend_signal(
-                base_url=args.base_url,
+                base_url=base_url,
                 signal_id=signal_id,
                 timeout_seconds=args.backend_poll_timeout_seconds,
                 interval_seconds=2.0,
@@ -219,14 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run remote Marcus local-executor e2e checks.")
     parser.add_argument("--base-url", default="https://marcus-api.tromoi.xyz")
     parser.add_argument("--ws-url", default="ws://171.244.195.150:8081/ws/executor")
-    parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
+    parser.add_argument("--dev-env-file", default=str(DEFAULT_DEV_ENV_FILE))
+    parser.add_argument("--trader-env-file", default=str(DEFAULT_TRADER_ENV_FILE))
     parser.add_argument("--executor-db-path", default=str(DEFAULT_DB_PATH))
     parser.add_argument("--env-file", default=None, help="Optional local env file containing exchange credentials.")
-    parser.add_argument("--dev-email", default="demo-dev@gmail.com")
-    parser.add_argument("--dev-password", default="Password123!")
-    parser.add_argument("--trader-email", default="demo-trader@gmail.com")
-    parser.add_argument("--trader-password", default="Password123!")
-    parser.add_argument("--bot-name", default="e2e-bot")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--amount", type=float, default=0.001)
     parser.add_argument("--signal-action", default="OPEN_SHORT")
@@ -237,12 +240,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exchange-id", default=os.getenv("EXCHANGE_ID", "binance"))
     parser.add_argument("--default-order-type", default="market")
     parser.add_argument("--log-level", default="DEBUG")
-    parser.add_argument("--skip-provision", action="store_true")
     parser.add_argument("--skip-executor", action="store_true")
     parser.add_argument("--skip-idempotency", action="store_true")
     parser.add_argument("--skip-invalid-payload", action="store_true")
     parser.add_argument("--skip-backend-poll", action="store_true")
-    parser.add_argument("--probe-only", action="store_true", help="Stop after provisioning state validation and websocket handshake.")
+    parser.add_argument("--probe-only", action="store_true", help="Stop after websocket handshake.")
     parser.add_argument("--ws-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--http-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--executor-start-timeout-seconds", type=float, default=30.0)
@@ -252,6 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -263,62 +267,13 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
-def run_provisioning(args: argparse.Namespace, state_file: Path) -> None:
-    command = [
-        sys.executable,
-        str(PROVISION_SCRIPT),
-        "--base-url",
-        args.base_url,
-        "--dev-email",
-        args.dev_email,
-        "--dev-password",
-        args.dev_password,
-        "--trader-email",
-        args.trader_email,
-        "--trader-password",
-        args.trader_password,
-        "--bot-name",
-        args.bot_name,
-        "--state-file",
-        str(state_file),
-        "--reuse-state",
-        "--provision-only",
-    ]
-    print(f"Running provisioning script state_file={state_file}")
-    completed = subprocess.run(
-        command,
-        cwd=str(ROOT),
-        text=True,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    secrets: list[str] = []
-    if state_file.exists():
-        try:
-            state = load_state(state_file)
-            secrets.extend(str(state.get(key, "")) for key in REQUIRED_STATE_KEYS)
-            secrets.extend(str(state.get(key, "")) for key in ("dev_token", "trader_token"))
-        except Exception:
-            pass
-    print(redact_text(completed.stdout or "", secrets), end="")
-    if completed.returncode != 0:
-        raise RuntimeError(f"provisioning failed with exit code {completed.returncode}")
-
-
-def load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise RuntimeError(f"state file not found: {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise RuntimeError(f"state file must contain a JSON object: {path}")
-    return data
-
-
-def validate_state(state: dict[str, Any]) -> None:
-    missing = [key for key in REQUIRED_STATE_KEYS if not str(state.get(key) or "").strip()]
-    if missing:
-        raise RuntimeError(f"provisioning state missing required keys: {', '.join(missing)}")
+def validate_state() -> None:
+    missing_dev = [k for k in REQUIRED_DEV_KEYS if not os.environ.get(k)]
+    if missing_dev:
+        raise RuntimeError(f"developer .env missing required keys: {', '.join(missing_dev)}")
+    missing_trader = [k for k in REQUIRED_TRADER_KEYS if not os.environ.get(k)]
+    if missing_trader:
+        raise RuntimeError(f"trader .env missing required keys: {', '.join(missing_trader)}")
 
 
 async def probe_handshake(ws_url: str, bot_id: str, ws_token: str, timeout_seconds: float) -> None:
@@ -332,7 +287,7 @@ async def probe_handshake(ws_url: str, bot_id: str, ws_token: str, timeout_secon
     ) as websocket:
         frame = build_handshake_frame(bot_id=bot_id, ws_token=ws_token)
         await websocket.send(json.dumps(frame, separators=(",", ":")))
-        raw = await asyncio.wait_for(websocket.recv(), timeout=timeout_seconds)
+        raw = await asyncio.wait_for(websocket.recv(), timeout_seconds)
         message = json.loads(raw)
         payload = message.get("payload") if isinstance(message, dict) else None
         if not isinstance(payload, dict):
@@ -363,7 +318,6 @@ def build_handshake_frame(bot_id: str, ws_token: str) -> dict[str, Any]:
 
 def start_executor(
     args: argparse.Namespace,
-    state: dict[str, Any],
     db_path: Path,
 ) -> tuple[subprocess.Popen[str], ChildLogReader]:
     required_exchange_env = ("EXCHANGE_API_KEY", "EXCHANGE_API_SECRET")
@@ -376,8 +330,8 @@ def start_executor(
     env.update(
         {
             "SYSTEM_WS_URL": args.ws_url,
-            "SYSTEM_WS_TOKEN": str(state["ws_token"]),
-            "BOT_ID": str(state["bot_id"]),
+            "SYSTEM_WS_TOKEN": os.environ["WS_TOKEN"],
+            "BOT_ID": os.environ["BOT_ID"],
             "EXECUTION_MODE": "live",
             "EXCHANGE_SANDBOX": "true",
             "EXCHANGE_ID": args.exchange_id,
@@ -389,7 +343,7 @@ def start_executor(
         }
     )
 
-    secrets = [str(state.get("ws_token", ""))]
+    secrets = [os.environ.get("WS_TOKEN", "")]
     secrets.extend(str(os.getenv(key, "")) for key in EXCHANGE_SECRET_ENV_KEYS)
 
     print(f"Starting local executor db={db_path}")
@@ -426,7 +380,17 @@ def build_signal_payload(
     market_type: str,
     order_type: str,
     entry: float | None,
+    take_profit: float | None = None,
+    stop_loss: float | None = None,
 ) -> dict[str, Any]:
+    if take_profit is None or stop_loss is None:
+        if action == "OPEN_LONG":
+            take_profit = entry * 1.01 if take_profit is None else take_profit
+            stop_loss = entry * 0.99 if stop_loss is None else stop_loss
+        elif action == "OPEN_SHORT":
+            take_profit = entry * 0.99 if take_profit is None else take_profit
+            stop_loss = entry * 1.01 if stop_loss is None else stop_loss
+
     return {
         "signalId": signal_id,
         "botId": bot_id,
@@ -436,6 +400,8 @@ def build_signal_payload(
         "orderType": order_type,
         "amount": amount,
         "entry": entry,
+        "takeProfit": take_profit,
+        "stopLoss": stop_loss,
         "generatedTimestamp": generated_timestamp(),
         "metadata": {"source": "remote_executor_e2e"},
     }

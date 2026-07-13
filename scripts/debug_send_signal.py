@@ -61,6 +61,8 @@ def main():
         "marketType": "FUTURE",
         "orderType": "MARKET",
         "entry": 76823.7,
+        "takeProfit": 76055.46,
+        "stopLoss": 77591.94,
         "amount": 0.00019525224637709457,
         "leverage": 1,
         "marginMode": "CROSS",
